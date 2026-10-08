@@ -1,0 +1,10 @@
+[package]
+name = "gba-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Game Boy Advance 模拟核心（纯 Rust、无 UI 依赖）"
+
+[dependencies]
+# 现阶段零第三方依赖：只用标准库。
+# 引入任何新依赖前先说明必要性（约定见 docs/design.md §9 依赖清单）。

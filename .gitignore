@@ -1,0 +1,9 @@
+# Rust
+/target
+
+# 前端（M5 加入 Tauri 应用后生效）
+node_modules/
+dist/
+
+# headless 示例的本地产物
+test-frame.bmp
