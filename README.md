@@ -1,26 +1,27 @@
 # gbars
 
-> 用 Rust 从零实现的 Game Boy Advance 模拟器 —— 一个边做边学的项目。
+> 用 Rust 从零实现的 Game Boy Advance 模拟器。
 >
 > 技术栈：Rust（模拟核心）· Tauri 2（桌面壳）· React + MUI（界面）
 > 验收目标：完整运行《Pokemon FireRed》
 
-## 这个仓库怎么"读"
+## 代码与文档约定
 
-本项目为学习而写，遵循两条约定（见 [docs/design.md](docs/design.md) §1.4）：
-
-1. **教学型注释**：代码注释用中文，重点解释"为什么这样设计/模拟"，而非复述代码行为；
-2. **每步一份说明文档**：每完成一个里程碑（或关键子步），`docs/notes/` 里会多一份说明文档，按编号顺序阅读即可跟着项目一起学。
+**本项目不写代码注释、不写解释文档**（约定见 [docs/design.md](docs/design.md) §1.4，2026-10-10 起生效）。
+`docs/notes/` 下的文档为历史存档，不再新增；现有注释与文档原样保留。
 
 | # | 文档 | 内容 |
 |---|------|------|
-| — | [docs/design.md](docs/design.md) | 总体设计方案：架构、模块、IPC 协议、里程碑 |
+| — | [docs/design.md](docs/design.md) | 总体设计方案：架构、模块、IPC 协议、里程碑（权威） |
+| — | [docs/HANDOFF.md](docs/HANDOFF.md) | 交接文档：现状、约定、下一步任务 |
 | 00 | [docs/notes/00-project-skeleton.md](docs/notes/00-project-skeleton.md) | 项目骨架：workspace、ROM 头部解析、帧契约 |
+| 01 | [docs/notes/01-memory-bus-and-arm-core.md](docs/notes/01-memory-bus-and-arm-core.md) | 内存总线、ARM 核心（历史） |
+| 02 | [docs/notes/02-block-transfers-and-thumb.md](docs/notes/02-block-transfers-and-thumb.md) | 块传输与 Thumb（历史） |
 
 ## 里程碑进度
 
 - [x] **M0 骨架** —— workspace、卡带装载与头部解析、帧契约、headless CLI
-- [ ] **M1 CPU**（收尾中）—— ARM + Thumb 指令集与 SWI HLE 全部落地（见 [docs/notes/01](docs/notes/01-memory-bus-and-arm-core.md)、[02](docs/notes/02-block-transfers-and-thumb.md)）；剩余：ArmWrestler 验收 + notes/03。交接文档见 [docs/HANDOFF.md](docs/HANDOFF.md)
+- [ ] **M1 CPU**（收尾中）—— ARM + Thumb 指令集与 SWI HLE 全部落地；剩余：ArmWrestler 验收。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
 - [ ] **M2 图形** —— 统一调度器、PPU 全模式渲染
 - [ ] **M3 系统** —— 中断 / 定时器 / DMA、Flash 128KB 存档
 - [ ] **M4 音频** —— PSG 四通道 + DirectSound FIFO
@@ -44,7 +45,8 @@ cargo run -p gba-core --example headless -- "D:/Games/gba roms/Pokemon.gba"
 ```text
 crates/gba-core/   # 模拟核心库（禁止依赖 UI 库；M5 的 Tauri 应用将以新成员加入）
 docs/design.md     # 设计方案（仓库内为权威版本）
-docs/notes/        # 每步的学习说明文档
+docs/HANDOFF.md    # 交接文档
+docs/notes/        # 历史学习文档（不再新增）
 ```
 
 ## 法律说明
