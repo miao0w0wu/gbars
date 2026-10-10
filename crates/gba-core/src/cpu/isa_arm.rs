@@ -32,7 +32,6 @@ use crate::bus::Bus;
 
 /// 向量表地址（GBATEK "Exceptions"）
 const VECTOR_UNDEFINED: u32 = 0x04;
-const VECTOR_SWI: u32 = 0x08;
 
 impl Cpu {
     /// 执行一条 ARM 指令。`insn` 必须已从 `regs[15] - 8` 取出。
@@ -53,7 +52,7 @@ impl Cpu {
     /// 按位 27–25 粗分类分发（见模块文档的编码地图）。
     fn execute(&mut self, insn: u32, bus: &mut Bus) -> Result<(), CpuError> {
         match (insn >> 25) & 0x7 {
-            0b000 => self.category_000(insn),
+            0b000 => self.category_000(insn, bus),
             0b001 => self.data_processing(insn), // 立即数版（含 MSR 立即数）
             0b010 => self.single_transfer(insn, bus),
             0b011 | 0b110 => {
@@ -62,14 +61,17 @@ impl Cpu {
                 self.enter_exception(VECTOR_UNDEFINED, Mode::Undefined);
                 Ok(())
             }
-            0b100 => Err(CpuError::unimplemented(insn, self.regs[15].wrapping_sub(8))), // LDM/STM：M1-b
+            0b100 => {
+                self.block_transfer(insn, bus);
+                Ok(())
+            }
             0b101 => {
                 self.branch(insn);
                 Ok(())
             }
             _ => {
                 if insn & (1 << 24) != 0 {
-                    self.swi(); // 1111 + 位24=1：SWI
+                    self.swi(bus, insn & 0x00FF_FFFF); // 1111 + 位24=1：SWI
                 } else {
                     self.enter_exception(VECTOR_UNDEFINED, Mode::Undefined); // CDP/MCR
                 }
@@ -79,8 +81,7 @@ impl Cpu {
     }
 
     /// 位 27–25 = 000 的杂烩区：数据处理、BX、乘法、SWP、半字传输。
-    /// （这一类都不直接访问内存，无须总线。）
-    fn category_000(&mut self, insn: u32) -> Result<(), CpuError> {
+    fn category_000(&mut self, insn: u32, bus: &mut Bus) -> Result<(), CpuError> {
         // BX 占据 cond 0001 0010 1111 1111 0001 xxxx 的编码空间
         if insn & 0x0FFF_FFF0 == 0x012F_FF10 {
             self.branch_exchange(insn);
@@ -90,10 +91,16 @@ impl Cpu {
         if insn & 0x90 == 0x90 {
             if insn & (1 << 24) == 0 {
                 self.multiply(insn); // 位 27-24 = 0000：乘法族
-                return Ok(());
+            } else if insn & (1 << 6) == 0 && insn & (1 << 5) == 0 {
+                // SWP/SWPB：位 6-5 **同时**为 00 才是交换指令。
+                // 半字族位 6-5 = 01(H)/10(SB)/11(SH)——只判 bit6 会把 LDRH
+                // （bit6=0, bit5=1）误判成 SWP，只判 bit5 会把 LDRSB 误判。
+                // 必须两位一起判。
+                self.swap(insn, bus);
+            } else {
+                self.half_transfer(insn, bus); // 位 6-5 ≠ 00：半字/有符号传输
             }
-            // SWP 与半字/有符号传输：M1-b 实现（先报未实现）
-            return Err(CpuError::unimplemented(insn, self.regs[15].wrapping_sub(8)));
+            return Ok(());
         }
         self.data_processing(insn)
     }
@@ -254,8 +261,8 @@ impl Cpu {
             let saved = self.spsr[self.mode().bank()];
             self.write_cpsr(saved);
         }
-        // 维持流水线约定：执行目标指令时 regs[15] = 目标 + 8（ARM）/ +4（Thumb，
-        // SPSR 恢复可能带回 T=1，即 v4 的异常返回状态切换）
+        // 写目标 PC：ARM 态 = 目标 + 8；若 SPSR 恢复带回 T=1 则进 Thumb
+        // （ARMv4 没有 BLX，靠异常返回把状态切到 Thumb）
         if self.t() {
             self.regs[15] = (value & !1).wrapping_add(4);
         } else {
@@ -395,10 +402,186 @@ impl Cpu {
         }
     }
 
-    /// SWI：软件中断。M1-d 将在此叠加 HLE——游戏的 BIOS 调用
-    /// （LZ77 解压、除法等）将被直接模拟而不是跳进零 BIOS。
-    fn swi(&mut self) {
-        self.enter_exception(VECTOR_SWI, Mode::Supervisor);
+    /// SWI：软件中断。无 BIOS 模式下走 HLE——`bios::hle_swi` 直接算出
+    /// BIOS 调用的结果（改寄存器/内存），PC 像普通指令一样推进；只有
+    /// HLE 未覆盖的编号才回落到异常入口。
+    fn swi(&mut self, bus: &mut Bus, comment: u32) {
+        crate::bios::hle_swi(self, bus, comment);
+    }
+
+    /// LDM/STM：一次搬运多个寄存器。函数序言/尾声（压栈/出栈）全靠它。
+    ///
+    /// 四种寻址模式由 P 位（前/后）与 U 位（增/减）组合而成，用 R13 当
+    /// 基址时习惯写成：
+    ///
+    /// | 模式 | 编码 | 含义 | 别名 |
+    /// |------|------|------|------|
+    /// | IA | P=0 U=1 | 从基址起，先访问后自增 | `STMIA` / `LDMFD`（满递减栈出栈） |
+    /// | IB | P=1 U=1 | 基址先增，再访问 | `STMIB` / `LDMED` |
+    /// | DA | P=0 U=0 | 从基址起，先访问后自减 | `STMDA` / `LDMFA` |
+    /// | DB | P=1 U=0 | 基址先减，再访问 | `STMDB` / `LDMFD` 入栈（`PUSH`） |
+    ///
+    /// 统一算法：按内存地址从低到高逐个处理寄存器；方向 U=0 时**最高编号
+    /// 寄存器落在最低地址**（这决定多个寄存器入栈后的内存排布）。
+    /// 地址计算与此处顺序均已对照 mGBA `GBALoadMultiple/StoreMultiple`
+    /// （`src/gba/memory.c`）。
+    fn block_transfer(&mut self, insn: u32, bus: &mut Bus) {
+        let pre = insn & (1 << 24) != 0;
+        let up = insn & (1 << 23) != 0;
+        let s_bit = insn & (1 << 22) != 0;
+        let writeback = insn & (1 << 21) != 0;
+        let load = insn & (1 << 20) != 0;
+        let rn = ((insn >> 16) & 0xF) as usize;
+        let list = insn & 0xFFFF;
+        let count = list.count_ones();
+        let base = self.regs[rn];
+
+        // 计算"最低地址"与"寄存器编号 → 地址"的映射。
+        //
+        // 统一算法（GBATEK "LSM"）：先求本次传输覆盖的最低地址 low，然后
+        //   - 递增（U=1）：编号小的寄存器在低地址：addr(r) = low + k*4
+        //   - 递减（U=0）：编号大的寄存器在低地址：addr(r) = low + (count-1-k)*4
+        // 其中 k 是 r 在列表中的序号（从 0 起）。四种模式的 low 与结束地址：
+        //
+        // | 模式 | low | 结束后基址 |
+        // |------|-----|-----------|
+        // | IA (P0 U1) | base | base + count*4 |
+        // | IB (P1 U1) | base + 4 | base + count*4 |
+        // | DA (P0 U0) | base - count*4 + 4 | base - count*4 + 4 |
+        // | DB (P1 U0) | base - count*4 | base - count*4 |
+        let low = match (pre, up) {
+            (false, true) => base,                                          // IA
+            (true, true) => base.wrapping_add(4),                           // IB
+            (false, false) => base.wrapping_sub(4 * count).wrapping_add(4), // DA
+            (true, false) => base.wrapping_sub(4 * count),                  // DB
+        };
+        // 基址写回后的值：递增模式落在最高地址之上，递减模式落在 low
+        let new_base = if up {
+            base.wrapping_add(4 * count)
+        } else {
+            low
+        };
+
+        // S 位 + 非 User 模式：LDM 装载 PC（R15 在列表里）时恢复 CPSR；
+        // 否则在 User 态银行里访问寄存器（用户态块传输，很少见）
+        let restore_spsr = load && s_bit && list & 0x8000 != 0 && self.mode().has_spsr();
+        let mut regs = 0u32;
+        for r in 0..16u32 {
+            if list & (1 << r) == 0 {
+                continue;
+            }
+            // 无论递增还是递减，**编号小的寄存器总在低地址**——
+            // "递减"描述的是基址如何算出 low，不是寄存器到地址的映射方向。
+            // （这正是 STMDB/PUSH 后内存里 r0 在最低地址、rN 在最高地址的原因）
+            let a = low.wrapping_add(regs * 4);
+            regs += 1;
+            if load {
+                let value = bus.read_u32(a);
+                if r == 15 {
+                    // LDM 装 PC：PC 变化，且可能恢复 CPSR（异常返回）
+                    self.write_pc_arm(value, restore_spsr);
+                } else {
+                    self.regs[r as usize] = value;
+                }
+            } else {
+                let value = self.regs[r as usize];
+                bus.write_u32(a, value);
+            }
+        }
+
+        // 基址写回。关键规则（GBATEK "LSM" 的 ULD/W 位说明）：
+        // 若基址寄存器 Rn 也在传输列表中，写回值要分情况——
+        //   - 装载（LDM）：Rn 是列表中**最低编号**时，写回被装载的值
+        //     （跳过新基址）；否则写回新基址；
+        //   - 存储（STM）：Rn 是列表中**最低编号**时，写回新基址；
+        //     否则写回被存进去的旧值（即不写回）。
+        // 直观理解：硬件先算好新基址，只有当"内存访问用的旧值"被 Rn 自己
+        // 覆盖时才让新基址生效，避免压栈时把栈指针覆盖成待存的数据。
+        if writeback {
+            let rn_in_list = list & (1 << rn) != 0;
+            let rn_is_lowest = rn_in_list && (list & ((1u32 << rn) - 1)) == 0;
+            let do_writeback = if !rn_in_list {
+                true
+            } else if load {
+                // LDM：Rn 是最低编号 → 已被装载覆盖，不再写回
+                !rn_is_lowest
+            } else {
+                // STM：Rn 是最低编号 → 写回新基址
+                rn_is_lowest
+            };
+            if do_writeback {
+                self.regs[rn] = new_base;
+            }
+        }
+    }
+
+    /// SWP/SWPB：原子交换（读旧值 → 写新值 → 目标寄存器得到旧值）。
+    /// 没有真正的"原子性"问题——模拟器是单线程顺序执行。
+    fn swap(&mut self, insn: u32, bus: &mut Bus) {
+        let byte = insn & (1 << 22) != 0;
+        let rn = ((insn >> 16) & 0xF) as usize; // 地址基址
+        let rd = ((insn >> 12) & 0xF) as usize; // 目标（接收旧值）
+        let rm = (insn & 0xF) as usize; // 源（要写入的新值）
+        let addr = self.regs[rn];
+        let loaded = if byte {
+            let old = bus.read_u8(addr);
+            bus.write_u8(addr, self.regs[rm] as u8);
+            u32::from(old)
+        } else {
+            let old = bus.read_u32(addr);
+            bus.write_u32(addr, self.regs[rm]);
+            old
+        };
+        self.regs[rd] = loaded;
+    }
+
+    /// 半字与有符号字节/半字传输（LDRH/STRH/LDRSB/LDRSH）。
+    ///
+    /// 编码空间与 SWP 共享"位 7、4 = 1"区，用位 6-5 区分：
+    /// `01 = H`、`10 = SB`、`11 = SH`。SH 与 SB 装载结果要**符号扩展**
+    /// 到 32 位，这是与 LDRB（零扩展）的本质区别。
+    fn half_transfer(&mut self, insn: u32, bus: &mut Bus) {
+        let pre = insn & (1 << 24) != 0;
+        let up = insn & (1 << 23) != 0;
+        let immediate = insn & (1 << 22) != 0;
+        let writeback = insn & (1 << 21) != 0;
+        let load = insn & (1 << 20) != 0;
+        let rn = ((insn >> 16) & 0xF) as usize;
+        let rd = ((insn >> 12) & 0xF) as usize;
+        let kind = (insn >> 5) & 0x3; // 01=H, 10=SB, 11=SH
+
+        let offset = if immediate {
+            ((insn >> 4) & 0xF0) | (insn & 0xF) // 高 4 位与低 4 位拼成 8 位偏移
+        } else {
+            self.regs[(insn & 0xF) as usize]
+        };
+        let offset = if up { offset } else { offset.wrapping_neg() };
+        let base = self.regs[rn];
+        let addr = if pre { base.wrapping_add(offset) } else { base };
+
+        if load {
+            let value = match kind {
+                0x1 => u32::from(bus.read_u16(addr)), // LDRH：零扩展到 32 位
+                0x2 => alu::sign_extend(u32::from(bus.read_u8(addr)), 8) as u32, // LDRSB
+                _ => alu::sign_extend(u32::from(bus.read_u16(addr)), 16) as u32, // LDRSH
+            };
+            if rd == 15 {
+                // LDRH/LDRSB/LDRSH 目标为 PC：ARMv4 未定义（M5 架构才允许）。
+                // 真机行为不可预测，这里按 LDR PC 跳转处理以保证不停摆。
+                self.write_pc_arm(value, false);
+            } else {
+                self.regs[rd] = value;
+            }
+        } else {
+            match kind {
+                0x1 => bus.write_u16(addr, self.regs[rd] as u16),
+                _ => bus.write_u16(addr, self.regs[rd] as u16), // STRH（SB/SH 无存储形式）
+            }
+        }
+
+        if (!pre || writeback) && rn != 15 {
+            self.regs[rn] = base.wrapping_add(offset);
+        }
     }
 }
 
@@ -526,6 +709,98 @@ mod tests {
     }
 
     #[test]
+    fn ldm_stm_with_writeback_and_pc() {
+        let (mut cpu, mut bus) = setup();
+        cpu.regs[0] = 0x0200_0000;
+        cpu.regs[1] = 0x1111_1111;
+        cpu.regs[2] = 0x2222_2222;
+        // STMIA r0!, {r1, r2}：先存后自增，基址写回
+        cpu.arm_step(0xE8A0_0006, &mut bus).unwrap();
+        assert_eq!(bus.read_u32(0x0200_0000), 0x1111_1111);
+        assert_eq!(bus.read_u32(0x0200_0004), 0x2222_2222);
+        assert_eq!(cpu.reg(0), 0x0200_0008);
+        // LDMIA r0, {r3, r4}：从指定地址重新装载
+        cpu.regs[0] = 0x0200_0000;
+        cpu.arm_step(0xE890_0018, &mut bus).unwrap();
+        assert_eq!(cpu.reg(3), 0x1111_1111);
+        assert_eq!(cpu.reg(4), 0x2222_2222);
+    }
+
+    #[test]
+    fn stmdb_is_full_descending_push() {
+        // PUSH {r0-r2} 的 ARM 等价写法：STMDB sp!, {r0-r2}
+        // 寄存器按下标从高到低入栈，编号小的落在低地址
+        let (mut cpu, mut bus) = setup();
+        cpu.regs[13] = 0x0300_7F00;
+        cpu.regs[0] = 0xAA;
+        cpu.regs[1] = 0xBB;
+        cpu.regs[2] = 0xCC;
+        cpu.arm_step(0xE92D_0007, &mut bus).unwrap(); // STMDB sp!, {r0,r1,r2}
+        assert_eq!(cpu.reg(13), 0x0300_7EF4); // SP 下移 12
+        assert_eq!(bus.read_u32(0x0300_7EF4), 0xAA); // r0 在最低地址
+        assert_eq!(bus.read_u32(0x0300_7EFC), 0xCC);
+    }
+
+    #[test]
+    fn ldm_pc_is_exception_return() {
+        let (mut cpu, mut bus) = setup();
+        let stub_addr = 0x0200_0020;
+        bus.write_u32(stub_addr, 0x1111_1111);
+        bus.write_u32(stub_addr + 4, 0x0300_0500);
+        // 进入 SWI 后 LDMFD sp!, {r4, pc}（LDMEA 的异常返回写法）
+        cpu.regs[13] = stub_addr;
+        let _ = cpu.arm_step(0xEF00_0000, &mut bus); // SWI → svc 模式
+        let svc_sp = cpu.reg(13); // svc 的栈（由银行提供）
+        cpu.regs[13] = svc_sp;
+        bus.write_u32(svc_sp, 0x1111_1111);
+        bus.write_u32(svc_sp + 4, 0x0300_0500);
+        // LDMIA sp!, {r4, pc}
+        cpu.arm_step(0xE8BD_8010, &mut bus).unwrap();
+        assert_eq!(cpu.reg(4), 0x1111_1111);
+        assert_eq!(cpu.reg(15), 0x0300_0508); // 跳转：目标 + 8
+    }
+
+    #[test]
+    fn swp_exchanges_and_swpb() {
+        let (mut cpu, mut bus) = setup();
+        bus.write_u32(0x0200_0010, 0xCAFE_BABE);
+        cpu.regs[1] = 0x0200_0010;
+        cpu.regs[2] = 0x1234_5678;
+        cpu.arm_step(0xE101_2092, &mut bus).unwrap(); // SWP r2, r2, [r1]
+        assert_eq!(cpu.reg(2), 0xCAFE_BABE); // 拿到旧值
+        assert_eq!(bus.read_u32(0x0200_0010), 0x1234_5678); // 写进新值
+
+        bus.write_u8(0x0200_0020, 0x11);
+        cpu.regs[1] = 0x0200_0020;
+        cpu.regs[3] = 0x99;
+        cpu.arm_step(0xE141_3093, &mut bus).unwrap(); // SWPB r3, r3, [r1]
+        assert_eq!(cpu.reg(3), 0x11);
+        assert_eq!(bus.read_u8(0x0200_0020), 0x99);
+    }
+
+    #[test]
+    fn half_and_signed_transfers() {
+        let (mut cpu, mut bus) = setup();
+        bus.write_u16(0x0200_0000, 0x8001);
+        cpu.regs[1] = 0x0200_0000;
+        cpu.regs[2] = 0x0200_0010;
+
+        cpu.arm_step(0xE1D1_30B0, &mut bus).unwrap(); // LDRH r3, [r1]
+        assert_eq!(cpu.reg(3), 0x8001); // 零扩展
+
+        cpu.arm_step(0xE1D1_40D0, &mut bus).unwrap(); // LDRSB r4, [r1]
+        assert_eq!(cpu.reg(4), 0x0000_0001); // 低字节 0x01 → 正数
+
+        cpu.arm_step(0xE1D1_50F0, &mut bus).unwrap(); // LDRSH r5, [r1]
+        assert_eq!(cpu.reg(5), 0xFFFF_8001); // 半字符号扩展到 32 位
+
+        // STRH 立即数偏移写回
+        cpu.regs[6] = 0x1234;
+        cpu.arm_step(0xE1C2_60B2, &mut bus).unwrap(); // STRH r6, [r2, #2]
+        assert_eq!(bus.read_u16(0x0200_0012), 0x1234);
+    }
+
+    #[test]
     fn post_index_writeback() {
         let (mut cpu, mut bus) = setup();
         cpu.regs[1] = 0x0200_0000;
@@ -558,25 +833,31 @@ mod tests {
     }
 
     #[test]
-    fn swi_enters_supervisor() {
-        let addr = IWRAM + 0x40;
-        let (mut cpu, mut bus) = setup_at(addr);
-        cpu.arm_step(0xEF00_0018, &mut bus).unwrap(); // SWI 0x18
-        assert_eq!(cpu.mode(), Mode::Supervisor);
-        assert_eq!(cpu.reg(14), addr + 4); // 返回地址 = 本指令 + 4
-        assert_eq!(cpu.reg(15), VECTOR_SWI + 8);
-        assert!(cpu.cpsr() & (1 << 7) != 0, "进入异常屏蔽 IRQ");
-        assert_eq!(cpu.spsr[Mode::Supervisor.bank()], 0x1F, "SPSR 保存旧 CPSR");
+    fn swi_div_is_hle() {
+        // 无 BIOS 模式下 SWI 直接走 HLE：不切模式、不碰 PC，只有
+        // BIOS 调用的副作用（这里用 Div 验证：r0=商、r1=余数、r3=|商|）
+        let (mut cpu, mut bus) = setup();
+        cpu.regs[0] = 47; // num
+        cpu.regs[1] = 5; // denom
+        cpu.arm_step(0xEF00_0006, &mut bus).unwrap(); // SWI 0x06 (Div)
+        assert_eq!(cpu.reg(0), 9);
+        assert_eq!(cpu.reg(1), 2);
+        assert_eq!(cpu.reg(3), 9);
+        // PC 像普通指令一样推进（HLE 对调用者透明）
+        assert_eq!(cpu.reg(15), 0x0800_000C);
+        assert_eq!(cpu.mode(), Mode::System); // 模式没变
     }
 
     #[test]
     fn movs_pc_restores_cpsr_from_spsr() {
+        // 异常返回路径（MOVS pc, lr / LDM 带 S 位装 PC）依赖 SPSR 恢复。
+        // SWI 已被 HLE 接管，这里手动构造异常入口来测。
         let addr = IWRAM;
         let (mut cpu, mut bus) = setup_at(addr);
-        cpu.arm_step(0xEF00_0000, &mut bus).unwrap(); // SWI 0 → 进 SVC
+        cpu.enter_exception(0x08, Mode::Supervisor); // 模拟 SWI 异常入口
         cpu.arm_step(0xE1B0_F00E, &mut bus).unwrap(); // MOVS pc, lr（异常返回）
         assert_eq!(cpu.cpsr(), 0x1F); // CPSR 从 SPSR 整体恢复
-        assert_eq!(cpu.reg(15), addr + 12); // 回到 SWI 的下一条（+8 约定）
+        assert_eq!(cpu.reg(15), addr + 12); // 回到"SWI 的下一条"（+8 约定）
     }
 
     #[test]
@@ -597,10 +878,12 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_instructions_report_error() {
+    fn coprocessor_instructions_enter_undefined() {
+        // 协处理器指令（位 27-25 = 011/110）在 GBA 上触发未定义指令异常
+        // （Und 模式、跳向量 0x04）——这是真机行为，不是"未实现"。
         let (mut cpu, mut bus) = setup();
-        // LDMIA r0, {r1}（位 27-25 = 100）：M1-b 实现
-        let err = cpu.arm_step(0xE890_0002, &mut bus).unwrap_err();
-        assert!(matches!(err, CpuError::Unimplemented { .. }));
+        cpu.arm_step(0xEC00_0000, &mut bus).unwrap(); // 协处理器 CDP 空间
+        assert_eq!(cpu.mode(), Mode::Undefined);
+        assert_eq!(cpu.reg(15), 0x04 + 8); // 向量 0x04 的"指令地址+8"
     }
 }

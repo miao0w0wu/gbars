@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261009T085028200Z-14756-a4abba307c07",
+  "runId": "20261009T085028200Z-14756-a4abba307c07",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "da5ddd7d27f40408c8d93453fd7c5ae8d6dcb1c7",
+  "diffHash": "28ea85131bf7c5f217c35cc27c4bc4ded09e3e3696dd01b49a833298b5774694",
+  "rulesVersion": "unavailable",
+  "sessionHash": "d7765d6acf9de17032f7edd1155f424bc0f88c61db9f995495853f50ea9d3c7d",
+  "reportRef": ".mimosa/reports/task-review-sess_379c3f83-3d7a-4aff-bbd1-1722255c952a-20261009T085028200Z-14756-a4abba307c07.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "crates/gba-core/src/gba.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-09T08:50:28.632Z"
+}

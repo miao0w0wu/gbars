@@ -35,6 +35,7 @@
 
 pub(crate) mod alu;
 pub(crate) mod isa_arm;
+pub(crate) mod isa_thumb;
 
 use crate::bus::Bus;
 
@@ -92,6 +93,10 @@ pub enum CpuError {
 }
 
 impl CpuError {
+    /// 构造"未实现指令"错误。当前 ARM 与 Thumb 指令集已全部实现，
+    /// 尚无调用点；保留它是给后续里程碑（如 M5 的 ARMv5 扩展指令）
+    /// 一个现成的出错出口——宁可显式报错，也不要静默执行错指令。
+    #[allow(dead_code)]
     pub(crate) fn unimplemented(insn: u32, addr: u32) -> Self {
         CpuError::Unimplemented { insn, addr }
     }
@@ -154,6 +159,11 @@ pub struct Cpu {
     pub(crate) spsr: [u32; 6],
     /// 本条指令是否改写了 PC（分支/LDR PC/异常入口置位）。
     pub(crate) pc_written: bool,
+    /// Thumb 的 BL/BLX 需要两条 16 位指令：第一条把高半偏移与返回地址
+    /// 预置进 LR 并置此标志，第二条到来时合并完成跳转。
+    pub(crate) thumb_pending_bl: bool,
+    /// 上面那条 BL 是否为 BLX（切到 ARM 执行）。
+    pub(crate) thumb_bl_is_blx: bool,
     /// Halt/IntrWait 的睡眠标志（唤醒语义随 M3 中断实现）。
     pub(crate) halted: bool,
     /// 已执行的指令条数（周期级时序模型随 M2 调度器引入）。
@@ -172,6 +182,8 @@ impl Cpu {
             banked_lr: [0; 6],
             spsr: [0; 6],
             pc_written: false,
+            thumb_pending_bl: false,
+            thumb_bl_is_blx: false,
             halted: false,
             steps: 0,
         };
@@ -291,11 +303,20 @@ impl Cpu {
             return Ok(()); // 睡眠唤醒随 M3 中断实现
         }
         if self.t() {
-            // Thumb 执行在 M1-b 加入；撞到先报"未实现"而非静默出错
-            return Err(CpuError::unimplemented(0, self.regs[15].wrapping_sub(4)));
+            // Thumb 指令是 16 位，取指地址 = regs[15] - 4（两级流水）
+            let insn = bus.read_u16(self.regs[15].wrapping_sub(4));
+            self.thumb_step(insn, bus);
+            Ok(())
+        } else {
+            let insn = bus.read_u32(self.regs[15].wrapping_sub(8));
+            self.arm_step(insn, bus)
         }
-        let insn = bus.read_u32(self.regs[15].wrapping_sub(8));
-        self.arm_step(insn, bus)
+    }
+
+    /// 设置 ARM 态 PC（写入"目标 + 8"以维持流水线约定）。
+    pub(crate) fn set_pc_arm(&mut self, target: u32) {
+        self.regs[15] = (target & !3).wrapping_add(8);
+        self.pc_written = true;
     }
 }
 

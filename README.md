@@ -20,7 +20,7 @@
 ## 里程碑进度
 
 - [x] **M0 骨架** —— workspace、卡带装载与头部解析、帧契约、headless CLI
-- [ ] **M1 CPU**（进行中）—— 内存总线 + ARM 核心已落地（见 [docs/notes/01](docs/notes/01-memory-bus-and-arm-core.md)）；下一步：LDM/STM、半字传输、Thumb 指令集
+- [ ] **M1 CPU**（收尾中）—— ARM + Thumb 指令集与 SWI HLE 全部落地（见 [docs/notes/01](docs/notes/01-memory-bus-and-arm-core.md)、[02](docs/notes/02-block-transfers-and-thumb.md)）；剩余：ArmWrestler 验收 + notes/03。交接文档见 [docs/HANDOFF.md](docs/HANDOFF.md)
 - [ ] **M2 图形** —— 统一调度器、PPU 全模式渲染
 - [ ] **M3 系统** —— 中断 / 定时器 / DMA、Flash 128KB 存档
 - [ ] **M4 音频** —— PSG 四通道 + DirectSound FIFO
