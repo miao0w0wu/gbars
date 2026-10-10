@@ -11,11 +11,16 @@ use std::path::Path;
 use crate::bus::Bus;
 use crate::cartridge::{Cartridge, CartridgeError};
 use crate::cpu::{Cpu, CpuError};
+use crate::frame::Frame;
+use crate::scheduler::Scheduler;
 
 /// 一台完整状态聚合在结构体内的 GBA（无全局变量，可整体快照/恢复）。
 pub struct GameBoyAdvance {
     pub cpu: Cpu,
     pub bus: Bus,
+    pub scheduler: Scheduler,
+    /// 最新一次 [`GameBoyAdvance::run_frame`] 输出的帧。
+    frame: Frame,
 }
 
 impl GameBoyAdvance {
@@ -29,6 +34,8 @@ impl GameBoyAdvance {
         let mut gba = Self {
             cpu: Cpu::new_no_bios(),
             bus,
+            scheduler: Scheduler::new(),
+            frame: Frame::black(),
         };
         gba.apply_no_bios_io_defaults();
         Ok(gba)
@@ -46,9 +53,36 @@ impl GameBoyAdvance {
         self.bus.cart()
     }
 
-    /// 执行一条指令（M2 会变成 `run_frame()` 整帧推进）。
+    pub fn ppu(&self) -> &crate::ppu::Ppu {
+        self.bus.ppu()
+    }
+
+    /// 执行一条指令。
     pub fn step(&mut self) -> Result<(), CpuError> {
         self.cpu.step(&mut self.bus)
+    }
+
+    /// 推进一整帧（280,896 周期），返回最新画面。
+    pub fn run_frame(&mut self) -> Result<&Frame, CpuError> {
+        self.scheduler.reset_frame();
+        self.scheduler.run_frame(&mut self.cpu, &mut self.bus)?;
+        self.capture_frame();
+        Ok(&self.frame)
+    }
+
+    /// 把 PPU 的当前画面拷进帧缓冲。
+    fn capture_frame(&mut self) {
+        let ppu = self.bus.ppu();
+        let frame = &mut self.frame;
+        let pixels = frame.pixels_mut();
+        for y in 0..crate::frame::SCREEN_HEIGHT {
+            ppu.write_line_to_frame(y, pixels);
+        }
+    }
+
+    /// 最近一帧（在 [`GameBoyAdvance::run_frame`] 之前是全黑）。
+    pub fn frame(&self) -> &Frame {
+        &self.frame
     }
 }
 
@@ -155,9 +189,9 @@ mod tests {
             gba.step().unwrap();
         }
 
-        // 子程序返回后，入口的 B .（自旋）在 ARM 态——这正是"从 Thumb 函数
-        // 返回即切回 ARM"的真实行为（POP {PC} 装的是偶数地址）
-        assert!(!gba.cpu.t(), "返回入口后应回到 ARM 态自旋");
+        // 子程序返回后，入口的 B .（自旋）仍在 Thumb 态——BL 留下的 LR
+        // 带着 Thumb 位（|1），POP {PC} 装载后按位 0 维持 Thumb。
+        assert!(gba.cpu.t(), "POP PC 装载带位 1 的返回地址应保持 Thumb 态");
         assert_eq!(gba.cpu.reg(0), 0x0800_0011); // r0 被 POP {r0,pc} 恢复为入口常数
         assert_eq!(
             gba.bus.read_u32(0x0200_0000),

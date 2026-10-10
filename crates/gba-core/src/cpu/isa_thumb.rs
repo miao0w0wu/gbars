@@ -66,7 +66,7 @@ impl Cpu {
     /// | 17 | F5 高寄存器/BX（0x4400）|
     /// | 18..=19 | F6 PC 相对装载（0x4800）|
     /// | 20..=23 | F7/F8 寄存器偏移装载存储（0x5000）|
-    /// | 24..=27 | F9 立即数偏移装载存储（0x6000）|
+    /// | 24..=31 | F9 立即数偏移装载存储（0x6000–0x7FFF）|
     /// | 28..=31 | 保留（0x7000）|
     /// | 32..=35 | F10 半字立即数偏移（0x8000）|
     /// | 36..=39 | F11 SP 相对（0x9000）|
@@ -80,14 +80,16 @@ impl Cpu {
     /// | 60..=63 | F19 BL/BLX（0xF000）|
     fn thumb_execute(&mut self, insn: u16, bus: &mut Bus) {
         match insn >> 10 {
-            0..=1 => self.thumb_f1_2_shift_add_sub(insn, (insn >> 11) & 0x3),
-            2..=7 => self.thumb_f1_2_shift_add_sub(insn, 0b11), // F2：加/减
+            // F1：LSL(0..=1)/LSR(2..=3)/ASR(4..=5)，op = 位 12-11 的两位值；
+            // F2：ADD/SUB（6..=7）
+            0..=5 => self.thumb_f1_2_shift_add_sub(insn, (insn >> 11) & 0x3),
+            6..=7 => self.thumb_f1_2_shift_add_sub(insn, 0b11), // F2：加/减
             8..=15 => self.thumb_f3_mov_cmp_add_sub_imm(insn),  // F3
             16 => self.thumb_f4_alu(insn),                      // F4
             17 => self.thumb_f5_hireg_bx(insn, bus),            // F5
             18..=19 => self.thumb_f6_pc_relative_load(insn, bus), // F6
             20..=23 => self.thumb_f7_8_load_store_reg(insn, bus), // F7/F8
-            24..=27 => self.thumb_f9_load_store_imm(insn, bus), // F9
+            24..=31 => self.thumb_f9_load_store_imm(insn, bus), // F9
             32..=35 => self.thumb_f10_load_store_half(insn, bus), // F10
             36..=39 => self.thumb_f11_sp_relative(insn, bus),   // F11
             40..=43 => self.thumb_f12_13_load_address(insn),    // F12
@@ -409,14 +411,22 @@ impl Cpu {
     }
 
     /// F14：`PUSH/POP {寄存器列表[, LR|PC]}`
+    ///
+    /// 位 8 的含义按方向不同：PUSH 上是 LR（r14），POP 上是 PC（r15）。
     fn thumb_f14_push_pop(&mut self, insn: u16, bus: &mut Bus) {
         let pop = insn & (1 << 11) != 0;
-        let extra = insn & (1 << 8) != 0; // PUSH 时是 LR，POP 时是 PC
-        let list = (insn & 0xFF) as u32 | if extra { 0x8000 } else { 0 };
+        let extra = insn & (1 << 8) != 0;
+        let list = (insn & 0xFF) as u32
+            | match (pop, extra) {
+                (true, true) => 1 << 15,  // POP {…, pc}
+                (false, true) => 1 << 14, // PUSH {…, lr}
+                _ => 0,
+            };
 
         if pop {
             // POP：从 SP 起按低地址到高地址装载（SP 递增）
             let mut addr = self.regs[13];
+            let mut popped_pc: Option<u32> = None;
             for r in 0..16u32 {
                 if list & (1 << r) == 0 {
                     continue;
@@ -424,17 +434,17 @@ impl Cpu {
                 let value = bus.read_u32(addr);
                 addr = addr.wrapping_add(4);
                 if r == 15 {
-                    // POP {PC}：函数返回——Thumb 的返回靠装载 PC，按位 0
-                    // 决定切换 ARM（这就是 Thumb 函数指针是奇数的原因）
-                    self.branch_exchange_thumb(value);
+                    // POP {PC} 的装载值可能在同一指令里被低编号寄存器覆盖
+                    // （如 POP {r0, pc} 恰好 r0 = 返回地址的编码情形），所以
+                    // 先暂存，寄存器全部写完后统一落地。
+                    popped_pc = Some(value);
                 } else {
                     self.regs[r as usize] = value;
                 }
             }
-            if !self.pc_written {
-                self.regs[13] = addr;
-            } else {
-                self.regs[13] = addr; // SP 已更新，PC 也已跳走
+            self.regs[13] = addr;
+            if let Some(value) = popped_pc {
+                self.branch_exchange_thumb(value);
             }
         } else {
             // PUSH：满递减栈——先减 SP，再把寄存器按下标**从高到低**入栈，
@@ -508,10 +518,16 @@ impl Cpu {
     /// F19：`BL`/`BLX` 的第一条指令——把高 11 位偏移暂存，
     /// 等第二条指令到来时合并成完整偏移与返回地址。
     fn thumb_f19_long_branch(&mut self, insn: u16) {
-        // GBATEK：第一条里 LR = PC(可见) + (hi << 12)。
-        // 本项目 regs[15] 恰是可见 PC（= 指令地址 + 4），故直接相加。
-        let hi = insn & 0x7FF;
-        self.regs[14] = self.regs[15].wrapping_add(u32::from(hi) << 12);
+        // GBATEK：第一条里 LR = PC(可见) + sign_extend(hi<<12, 23)。
+        // 偏移整体是 23 位有符号数（bit22 是符号位），高半段的 0x400..0x7FF
+        // 表示负偏移，必须在这里就完成符号扩展，否则负跳转会绕到高地址。
+        let hi = u32::from(insn & 0x7FF) << 12;
+        let offset = if hi & (1 << 22) != 0 {
+            hi.wrapping_sub(1 << 23)
+        } else {
+            hi
+        };
+        self.regs[14] = self.regs[15].wrapping_add(offset);
         self.thumb_pending_bl = true;
         self.thumb_bl_is_blx = insn & (1 << 12) == 0; // 位 12=0 为 BLX
     }

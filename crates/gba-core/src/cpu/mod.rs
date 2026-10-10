@@ -166,8 +166,10 @@ pub struct Cpu {
     pub(crate) thumb_bl_is_blx: bool,
     /// Halt/IntrWait 的睡眠标志（唤醒语义随 M3 中断实现）。
     pub(crate) halted: bool,
-    /// 已执行的指令条数（周期级时序模型随 M2 调度器引入）。
+    /// 已执行的指令条数。
     pub(crate) steps: u64,
+    /// 自上次 [`Cpu::take_cycles`] 以来本条/本批指令累计的时钟周期。
+    pub(crate) cycles: u32,
 }
 
 impl Cpu {
@@ -186,6 +188,7 @@ impl Cpu {
             thumb_bl_is_blx: false,
             halted: false,
             steps: 0,
+            cycles: 0,
         };
         // regs[15] = 启动地址 + 8：按流水线约定，"即将执行 0x08000000"
         cpu.regs[15] = 0x0800_0008;
@@ -220,6 +223,16 @@ impl Cpu {
 
     pub fn steps(&self) -> u64 {
         self.steps
+    }
+
+    /// 取走自上次调用以来累计的周期数（调度器据此推进全局时钟）。
+    pub(crate) fn take_cycles(&mut self) -> u32 {
+        core::mem::take(&mut self.cycles)
+    }
+
+    /// 指令基础周期：取指成本 + 执行开销。
+    pub(crate) fn charge(&mut self, cycles: u32) {
+        self.cycles += cycles;
     }
 
     // ---- 标志位操作（供 isa_arm 使用）----
@@ -300,17 +313,42 @@ impl Cpu {
     /// 取指并执行一条指令。
     pub fn step(&mut self, bus: &mut Bus) -> Result<(), CpuError> {
         if self.halted {
-            return Ok(()); // 睡眠唤醒随 M3 中断实现
+            self.charge(1); // 睡眠期仍消耗时钟；唤醒随 M3 中断实现
+            return Ok(());
         }
         if self.t() {
             // Thumb 指令是 16 位，取指地址 = regs[15] - 4（两级流水）
-            let insn = bus.read_u16(self.regs[15].wrapping_sub(4));
+            let fetch = self.regs[15].wrapping_sub(4);
+            self.charge(Bus::access_cycles(fetch, false));
+            let insn = bus.fetch_u16(fetch);
             self.thumb_step(insn, bus);
-            Ok(())
         } else {
-            let insn = bus.read_u32(self.regs[15].wrapping_sub(8));
-            self.arm_step(insn, bus)
+            // ARM 指令 32 位：16 位总线上要取两次（ARM 态取指固定按字）
+            let fetch = self.regs[15].wrapping_sub(8);
+            self.charge(Bus::access_cycles(fetch, true));
+            let insn = bus.fetch_u32(fetch);
+            self.arm_step(insn, bus)?;
         }
+        self.cycles += bus.take_data_cycles();
+        self.service_irq(bus);
+        Ok(())
+    }
+
+    /// 中断投递：IME 开 && IE&IF 非 0 时进入 IRQ 异常。
+    ///
+    /// 真机此时跳到 BIOS 的 0x18 向量；我们把 mGBA hle-bios.s 的 irqBase
+    /// 桩编码进了 BIOS 内存（见 [`install_irq_stub`]），CPU 会真跑那几条
+    /// 指令完成寄存器保存、调用游戏 handler 与 SUBS PC,LR,#4 返回。
+    fn service_irq(&mut self, bus: &mut Bus) {
+        let pending = bus.io.pending_irq();
+        if pending == 0 {
+            return;
+        }
+        if self.cpsr & (1 << 7) != 0 {
+            return; // CPU 侧 I 标志仍屏蔽，真机同样不投递
+        }
+        self.halted = false; // Halt/IntrWait 被中断唤醒
+        self.enter_exception(0x18, Mode::Irq);
     }
 
     /// 设置 ARM 态 PC（写入"目标 + 8"以维持流水线约定）。

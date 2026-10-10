@@ -18,11 +18,13 @@ use std::process::ExitCode;
 
 use gba_core::cartridge::Cartridge;
 use gba_core::frame::{FRAME_BYTES, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
+use gba_core::gba::GameBoyAdvance;
 
 fn main() -> ExitCode {
     // ---- 1. ROM 头部信息（第一个可选参数是 ROM 路径）----
     let args: Vec<String> = std::env::args().collect();
-    match args.get(1) {
+    let rom_path = args.get(1).filter(|p| !p.is_empty());
+    match rom_path {
         Some(path) => match Cartridge::load(path) {
             Ok(cart) => {
                 let h = cart.header();
@@ -53,7 +55,31 @@ fn main() -> ExitCode {
         None => println!("（未指定 ROM 路径，跳过头部解析）"),
     }
 
-    // ---- 2. 测试帧 → BMP：验证帧契约与落盘链路 ----
+    // ---- 2. 有 ROM 时：跑 N 帧并输出 BMP（第二个参数是帧数，默认 300）----
+    if let Some(path) = rom_path {
+        // `--trace N`：单步执行前 N 条指令并打印（M2 调试用）。
+        if let Some(pos) = args.iter().position(|a| a == "--trace") {
+            let n: u64 = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(64);
+            match trace(path, n) {
+                Ok(()) => return ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("运行失败: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        let frames: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(300);
+        let out = args.get(3).map(String::as_str).unwrap_or("frame.bmp");
+        match run_frames(path, frames, out) {
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("运行失败: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // ---- 3. 无 ROM：输出 SMPTE 测试帧，验证帧契约与落盘链路 ----
     let frame = Frame::test_pattern();
     match write_bmp("test-frame.bmp", &frame) {
         Ok(()) => println!(
@@ -65,6 +91,73 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// 单步执行前 `n` 条指令并打印 PC/模式/寄存器（M2 调试用）。
+/// `--trace N [from]`：从第 `from` 步开始打印，便于定位故障点。
+fn trace(rom: &str, n: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let mut gba = GameBoyAdvance::load_rom(rom)?;
+    for i in 0..n {
+        let t = gba.cpu.t();
+        let pc = gba.cpu.reg(15) - if t { 4 } else { 8 };
+        let insn = if t {
+            gba.bus.read_u16(pc) as u32
+        } else {
+            gba.bus.read_u32(pc)
+        };
+        if i % 20000 == 0 {
+            println!(
+                "#{i:<8} PC={pc:#010x} {} {:?} insn={insn:#08x} r0={:#010x} r1={:#010x} r4={:#010x} cpsr={:#010x} vcount={}",
+                if t { "TH" } else { "AR" },
+                gba.cpu.mode(),
+                gba.cpu.reg(0),
+                gba.cpu.reg(1),
+                gba.cpu.reg(4),
+                gba.cpu.cpsr(),
+                gba.ppu().vcount(),
+            );
+        }
+        gba.step()?;
+    }
+    Ok(())
+}
+
+/// 跑 `frames` 帧，把最后一帧写成 BMP，并打印 PPU/CPU 状态摘要。
+fn run_frames(rom: &str, frames: u32, out: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut gba = GameBoyAdvance::load_rom(rom)?;
+    for i in 0..frames {
+        if let Err(e) = gba.run_frame() {
+            eprintln!("第 {i} 帧执行出错: {e}");
+            eprintln!("  当前 PC = {:#010x}，模式 = {:?}", gba.cpu.reg(15), gba.cpu.mode());
+            return Err(e.into());
+        }
+    }
+    let frame = gba.frame().clone();
+    write_bmp(out, &frame)?;
+    let ppu = gba.ppu();
+    println!(
+        "跑完 {frames} 帧：DISPCNT={:#06x} VCOUNT={} 模式={} → {out}",
+        ppu.dispcnt(),
+        ppu.vcount(),
+        ppu.dispcnt() & 0x7
+    );
+    println!(
+        "  PC={:#010x} 模式={:?} steps={} TM0={:#06x} ctrl={:#04x}",
+        gba.cpu.reg(15),
+        gba.cpu.mode(),
+        gba.cpu.steps(),
+        gba.bus.read_u16(0x0400_0100),
+        gba.bus.read_u16(0x0400_0102),
+    );
+    println!(
+        "  handler={:#010x} IME={} IE={:#06x} IF={:#06x} DISPSTAT={:#06x}",
+        gba.bus.read_u32(0x03FF_FFFC),
+        gba.bus.read_u16(0x0400_0208),
+        gba.bus.read_u16(0x0400_0200),
+        gba.bus.read_u16(0x0400_0202),
+        gba.bus.read_u16(0x0400_0004),
+    );
+    Ok(())
 }
 
 /// 把 RGBA 帧写成 24 位 BMP 文件。

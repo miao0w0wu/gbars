@@ -8,21 +8,17 @@
 ## 代码与文档约定
 
 **本项目不写代码注释、不写解释文档**（约定见 [docs/design.md](docs/design.md) §1.4，2026-10-10 起生效）。
-`docs/notes/` 下的文档为历史存档，不再新增；现有注释与文档原样保留。
 
 | # | 文档 | 内容 |
 |---|------|------|
 | — | [docs/design.md](docs/design.md) | 总体设计方案：架构、模块、IPC 协议、里程碑（权威） |
 | — | [docs/HANDOFF.md](docs/HANDOFF.md) | 交接文档：现状、约定、下一步任务 |
-| 00 | [docs/notes/00-project-skeleton.md](docs/notes/00-project-skeleton.md) | 项目骨架：workspace、ROM 头部解析、帧契约 |
-| 01 | [docs/notes/01-memory-bus-and-arm-core.md](docs/notes/01-memory-bus-and-arm-core.md) | 内存总线、ARM 核心（历史） |
-| 02 | [docs/notes/02-block-transfers-and-thumb.md](docs/notes/02-block-transfers-and-thumb.md) | 块传输与 Thumb（历史） |
 
 ## 里程碑进度
 
 - [x] **M0 骨架** —— workspace、卡带装载与头部解析、帧契约、headless CLI
-- [ ] **M1 CPU**（收尾中）—— ARM + Thumb 指令集与 SWI HLE 全部落地；剩余：ArmWrestler 验收。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
-- [ ] **M2 图形** —— 统一调度器、PPU 全模式渲染
+- [x] **M1 CPU** —— ARM + Thumb 指令集与 SWI HLE 全部落地；59 测试全绿。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
+- [ ] **M2 图形**（进行中）—— 调度器、PPU 全模式渲染、定时器、DMA、中断投递主体已落地（工作区待提交）；剩余：修复 clippy/fmt 基线、PPU 渲染输出为纯色待排查、M2 模块补测试、FireRed 标题画面验收。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
 - [ ] **M3 系统** —— 中断 / 定时器 / DMA、Flash 128KB 存档
 - [ ] **M4 音频** —— PSG 四通道 + DirectSound FIFO
 - [ ] **M5 前端整合** —— Tauri 线程模型 + IPC + MUI 界面
@@ -36,8 +32,11 @@ cargo test                                             # 运行全部测试
 cargo fmt --check                                      # 格式检查
 cargo clippy --workspace --all-targets -- -D warnings  # 静态检查（零警告基线）
 
-# 无窗口运行核心（调试/回归入口）
-cargo run -p gba-core --example headless -- "D:/Games/gba roms/Pokemon.gba"
+# 无窗口运行核心：跑 N 帧输出 BMP + 状态摘要（调试/回归入口）
+cargo run -p gba-core --example headless -- test-roms/armwrestler.gba 600 frame.bmp
+
+# 单步跟踪前 N 条指令（调试用）
+cargo run -p gba-core --example headless -- test-roms/armwrestler.gba --trace 64
 ```
 
 ## 目录结构
@@ -46,7 +45,6 @@ cargo run -p gba-core --example headless -- "D:/Games/gba roms/Pokemon.gba"
 crates/gba-core/   # 模拟核心库（禁止依赖 UI 库；M5 的 Tauri 应用将以新成员加入）
 docs/design.md     # 设计方案（仓库内为权威版本）
 docs/HANDOFF.md    # 交接文档
-docs/notes/        # 历史学习文档（不再新增）
 ```
 
 ## 法律说明

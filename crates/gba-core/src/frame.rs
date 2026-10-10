@@ -76,6 +76,11 @@ impl Frame {
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+
+    /// 可写像素视图（仅 PPU 渲染使用）。
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
 }
 
 #[cfg(test)]

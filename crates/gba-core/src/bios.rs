@@ -39,8 +39,10 @@ pub(crate) fn hle_swi(cpu: &mut Cpu, bus: &mut Bus, comment: u32) {
         0x02 => cpu.halted = true, // Halt：M3 中断就绪后可被唤醒
         0x03 => {}                 // Stop：桩（真机进入深度睡眠，游戏极少用）
         // IntrWait / VBlankIntrWait：游戏主循环的心跳。
-        // TODO(M3)：中断控制器就绪后改为"清 IF → 挂起 → 唤醒"真语义。
-        0x04 | 0x05 => {}
+        // 语义（GBATEK）：清除 IF 中指定的位 → 挂起 → 对应中断到达时唤醒。
+        // VBlankIntrWait 还要求"清掉已 pending 的旧 VBlank 再等新的"。
+        0x04 => intr_wait(cpu, bus, cpu.reg(1) as u16, false),
+        0x05 => intr_wait(cpu, bus, 1, true),
         0x06 => div(cpu, cpu.reg(0) as i32, cpu.reg(1) as i32),
         0x07 => div(cpu, cpu.reg(1) as i32, cpu.reg(0) as i32),
         0x08 => cpu.regs[0] = isqrt(cpu.reg(0)),
@@ -75,6 +77,15 @@ pub(crate) fn hle_swi(cpu: &mut Cpu, bus: &mut Bus, comment: u32) {
 fn soft_reset(cpu: &mut Cpu, _bus: &mut Bus) {
     *cpu = Cpu::new_no_bios();
     cpu.pc_written = true;
+}
+
+/// IntrWait 真语义：清 IF 中关心的位 → 挂起（Halt）→ 中断唤醒。
+/// VBlankIntrWait 的要点：即使 VBlank 已 pending 也要先清掉再等新的
+/// （官方 BIOS 行为，游戏靠它对齐帧）。
+fn intr_wait(cpu: &mut Cpu, bus: &mut Bus, clear_mask: u16, vblank: bool) {
+    let mask = if vblank { 1 | clear_mask } else { clear_mask };
+    bus.io.clear_irq(mask);
+    cpu.halted = true;
 }
 
 /// RegisterRamReset：按 r0 位掩码清空各内存区（游戏启动时的例行打扫）。
