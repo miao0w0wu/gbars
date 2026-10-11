@@ -54,8 +54,8 @@ impl Cpu {
         match (insn >> 25) & 0x7 {
             0b000 => self.category_000(insn, bus),
             0b001 => self.data_processing(insn), // 立即数版（含 MSR 立即数）
-            0b010 => self.single_transfer(insn, bus),
-            0b011 | 0b110 => {
+            0b010 | 0b011 => self.single_transfer(insn, bus),
+            0b110 => {
                 // 协处理器空间：GBA 没有游戏可用的协处理器，真机行为
                 // 就是未定义指令异常
                 self.enter_exception(VECTOR_UNDEFINED, Mode::Undefined);
@@ -900,11 +900,28 @@ mod tests {
 
     #[test]
     fn coprocessor_instructions_enter_undefined() {
-        // 协处理器指令（位 27-25 = 011/110）在 GBA 上触发未定义指令异常
-        // （Und 模式、跳向量 0x04）——这是真机行为，不是"未实现"。
+        // 协处理器指令（位 27-25 = 110，或 111 且位 24 = 0）在 GBA 上触发
+        // 未定义指令异常（Und 模式、跳向量 0x04）——这是真机行为，不是"未实现"。
         let (mut cpu, mut bus) = setup();
         cpu.arm_step(0xEC00_0000, &mut bus).unwrap(); // 协处理器 CDP 空间
         assert_eq!(cpu.mode(), Mode::Undefined);
         assert_eq!(cpu.reg(15), 0x04 + 8); // 向量 0x04 的"指令地址+8"
+    }
+
+    #[test]
+    fn single_transfer_register_offset_is_not_coprocessor() {
+        let (mut cpu, mut bus) = setup();
+        // STRB r0, [r5, +r6]（位 27-25 = 011：寄存器偏移的内存访问，
+        // 曾被误判成协处理器空间而触发 Undefined 异常）
+        cpu.regs[5] = 0x0200_0000;
+        cpu.regs[6] = 0x10;
+        cpu.regs[0] = 0xAB;
+        cpu.arm_step(0xE7C5_0006, &mut bus).unwrap();
+        assert_eq!(bus.read_u8(0x0200_0010), 0xAB);
+        // LDR r2, [r1, +r0]
+        cpu.regs[1] = 0x0200_0000;
+        cpu.regs[0] = 4;
+        cpu.arm_step(0xE791_2002, &mut bus).unwrap();
+        assert_eq!(cpu.reg(2), bus.read_u32(0x0200_0004));
     }
 }

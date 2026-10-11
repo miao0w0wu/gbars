@@ -134,10 +134,10 @@ mod tests {
         for i in 0..8u32 {
             bus.write_u16(0x0200_0000 + i * 2, 0x1000 + i as u16);
         }
-        bus.write_u32(0x0400_00B8, 0x0200_0000);
-        bus.write_u32(0x0400_00BC, 0x0200_0100);
-        bus.write_u16(0x0400_00C0, 4);
-        bus.write_u16(0x0400_00C2, 0x8000);
+        bus.write_u32(0x0400_00B0, 0x0200_0000);
+        bus.write_u32(0x0400_00B4, 0x0200_0100);
+        bus.write_u16(0x0400_00B8, 4);
+        bus.write_u16(0x0400_00BA, 0x8000);
         for i in 0..4u32 {
             assert_eq!(bus.read_u16(0x0200_0100 + i * 2), 0x1000 + i as u16);
         }
@@ -152,10 +152,10 @@ mod tests {
         for i in 0..3u32 {
             bus.write_u32(0x0200_0000 + i * 4, 0xAA00_0000 + i);
         }
-        bus.write_u32(0x0400_00B8, 0x0200_0000);
-        bus.write_u32(0x0400_00BC, 0x0200_0100);
-        bus.write_u16(0x0400_00C0, 3);
-        bus.write_u16(0x0400_00C2, 0x8440);
+        bus.write_u32(0x0400_00B0, 0x0200_0000);
+        bus.write_u32(0x0400_00B4, 0x0200_0100);
+        bus.write_u16(0x0400_00B8, 3);
+        bus.write_u16(0x0400_00BA, 0x8440);
         assert_eq!(bus.read_u32(0x0200_0100), 0xAA00_0002);
         assert_eq!(bus.io.dma.channel[0].src, 0x0200_000C);
         assert_eq!(bus.io.dma.channel[0].dst, 0x0200_0100);
@@ -165,9 +165,9 @@ mod tests {
     fn count_zero_expands_to_channel_maximum() {
         let mut bus = bus();
         bus.write_u16(0x0200_0000, 0xBEEF);
-        bus.write_u32(0x0400_00C4, 0x0200_0000);
-        bus.write_u32(0x0400_00C8, 0x0200_0100);
-        bus.write_u16(0x0400_00CE, 0x8100);
+        bus.write_u32(0x0400_00BC, 0x0200_0000);
+        bus.write_u32(0x0400_00C0, 0x0200_0100);
+        bus.write_u16(0x0400_00C6, 0x8100);
         assert_eq!(bus.read_u16(0x0200_0100 + 0x7FFE), 0xBEEF);
         assert_eq!(bus.io.dma.channel[1].dst, 0x0200_8100);
         assert_eq!(bus.io.dma.channel[1].ctrl & 0x8000, 0);
@@ -178,10 +178,10 @@ mod tests {
         let mut bus = bus();
         bus.write_u16(0x0200_0000, 0x1234);
         bus.write_u16(0x0200_0002, 0x5678);
-        bus.write_u32(0x0400_00DC, 0x0200_0000);
-        bus.write_u32(0x0400_00E0, 0x0200_0100);
-        bus.write_u16(0x0400_00E4, 1);
-        bus.write_u16(0x0400_00E6, 0x9200);
+        bus.write_u32(0x0400_00D4, 0x0200_0000);
+        bus.write_u32(0x0400_00D8, 0x0200_0100);
+        bus.write_u16(0x0400_00DC, 1);
+        bus.write_u16(0x0400_00DE, 0x9200);
         assert_eq!(bus.io.dma.channel[3].ctrl & 0x8000, 0x8000);
         bus.run_dma_triggers(1);
         assert_eq!(bus.read_u16(0x0200_0100), 0x1234);
@@ -198,10 +198,10 @@ mod tests {
         for i in 0..4u32 {
             bus.write_u16(0x0200_0000 + i * 2, 0x0300 + i as u16);
         }
-        bus.write_u32(0x0400_00DC, 0x0200_0000);
-        bus.write_u32(0x0400_00E0, 0x0200_0100);
-        bus.write_u16(0x0400_00E4, 2);
-        bus.write_u16(0x0400_00E6, 0x9260);
+        bus.write_u32(0x0400_00D4, 0x0200_0000);
+        bus.write_u32(0x0400_00D8, 0x0200_0100);
+        bus.write_u16(0x0400_00DC, 2);
+        bus.write_u16(0x0400_00DE, 0x9260);
         bus.run_dma_triggers(1);
         bus.run_dma_triggers(1);
         assert_eq!(bus.read_u16(0x0200_0100), 0x0302);

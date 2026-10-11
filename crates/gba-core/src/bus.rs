@@ -49,6 +49,9 @@ pub struct Bus {
     pub io: Io,
     /// 指令执行期间累计的数据访问周期；CPU 每步取走后计入全局时钟。
     data_cycles: u32,
+    /// 最近一次取指的 16 位值。GBA 对未映射地址（含未映射 I/O）的读返回
+    /// 数据总线残值，mGBA（GBALoadBad）以最后取指的半字近似。
+    last_fetch: u16,
 }
 
 impl Bus {
@@ -61,6 +64,7 @@ impl Bus {
             cart,
             io: Io::new(),
             data_cycles: 0,
+            last_fetch: 0,
         };
         bus.install_irq_stub();
         bus
@@ -163,11 +167,15 @@ impl Bus {
 
     /// 供取指使用的无记账读：取指周期由 CPU 显式按宽度收取。
     pub(crate) fn fetch_u16(&mut self, addr: u32) -> u16 {
-        self.read_u16_raw(addr)
+        let v = self.read_u16_raw(addr);
+        self.last_fetch = v;
+        v
     }
 
     pub(crate) fn fetch_u32(&mut self, addr: u32) -> u32 {
-        self.read_u32_raw(addr)
+        let v = self.read_u32_raw(addr);
+        self.last_fetch = (v >> 16) as u16;
+        v
     }
 
     fn read_u8_raw(&mut self, addr: u32) -> u8 {
@@ -175,7 +183,7 @@ impl Bus {
             0x00 | 0x01 => self.bios[(addr as usize) & (BIOS_SIZE - 1)],
             0x02 => self.ewram[(addr as usize) & EWRAM_MASK],
             0x03 => self.iwram[(addr as usize) & IWRAM_MASK],
-            0x04 => self.io.read_u8(addr & 0x3FF),
+            0x04 => self.io.read_u8(addr & 0x3FF, self.last_fetch),
             0x05 => self.io.ppu.palette[(addr as usize) & PALETTE_MASK],
             0x06 => self.io.ppu.vram[Self::vram_index(addr)],
             0x07 => self.io.ppu.oam[(addr as usize) & OAM_MASK],
@@ -395,5 +403,40 @@ mod tests {
         b.write_u8(0x0E00_0000, 0x5A);
         assert_eq!(b.read_u16(0x0E00_0000), 0x5A5A);
         assert_eq!(b.read_u32(0x0E00_0000), 0x5A5A_5A5A);
+    }
+
+    #[test]
+    fn unmapped_io_read_returns_last_fetch() {
+        let mut b = bus();
+        assert_eq!(b.read_u16(0x0400_0118), 0);
+        b.fetch_u16(0x0800_0010);
+        assert_eq!(b.read_u16(0x0400_0118), 0x1110);
+    }
+
+    #[test]
+    fn unmapped_io_writes_do_not_disturb_mapped_reads() {
+        let mut b = bus();
+        b.write_u16(0x0400_0118, 0x0083);
+        b.write_u16(0x0400_0204, 0x4317);
+        assert_eq!(b.read_u16(0x0400_0204), 0x4317);
+        assert_eq!(b.read_u16(0x0400_0006), 0);
+    }
+
+    #[test]
+    fn mapped_io_reads_stay_dedicated() {
+        let mut b = bus();
+        b.write_u16(0x0400_0006, 0x1234);
+        assert_eq!(b.read_u16(0x0400_0006), 0);
+        b.write_u16(0x0400_0204, 0x4317);
+        assert_eq!(b.read_u16(0x0400_0204), 0x4317);
+    }
+
+    #[test]
+    fn ppu_reg_reads_unaffected_by_open_bus() {
+        let mut b = bus();
+        b.write_u16(0x0400_0010, 0x01F5);
+        b.write_u16(0x0400_0048, 0x0706);
+        assert_eq!(b.read_u16(0x0400_0010), 0x01F5 & 0x1FF);
+        assert_eq!(b.read_u16(0x0400_0048), 0x0706);
     }
 }

@@ -74,8 +74,7 @@ impl Cpu {
     /// | 44 | F13 ADD SP,#imm（0xB000）|
     /// | 45..=47 | F14 PUSH/POP（0xB400/0xBC00）|
     /// | 48..=51 | F15 LDMIA/STMIA（0xC800）|
-    /// | 52..=54 | F16 条件跳转（0xD000）|
-    /// | 55 | F17 SWI（0xDF00）|
+    /// | 52..=55 | F16 条件跳转（0xD000）+ F17 SWI（0xDF00）|
     /// | 56..=59 | F18 无条件跳转（0xE000）|
     /// | 60..=63 | F19 BL/BLX（0xF000）|
     fn thumb_execute(&mut self, insn: u16, bus: &mut Bus) {
@@ -92,13 +91,12 @@ impl Cpu {
             24..=31 => self.thumb_f9_load_store_imm(insn, bus), // F9
             32..=35 => self.thumb_f10_load_store_half(insn, bus), // F10
             36..=39 => self.thumb_f11_sp_relative(insn, bus),   // F11
-            40..=43 => self.thumb_f12_13_load_address(insn),    // F12
-            44 => self.thumb_f12_13_load_address(insn),         // F13：ADD SP,#imm
+            40..=43 => self.thumb_f12_load_address(insn),       // F12
+            44 => self.thumb_f13_add_sub_sp(insn),              // F13：ADD/SUB SP,#imm
             45..=47 => self.thumb_f14_push_pop(insn, bus),      // F14
             48..=51 => self.thumb_f15_multiple(insn, bus),      // F15
-            52..=54 => self.thumb_f18_branch(insn),             // F16：条件跳转
-            55 => self.thumb_f17_swi(insn, bus),                // F17：SWI
-            56..=59 => self.thumb_f18_branch(insn),             // F18：无条件跳转
+            52..=55 => self.thumb_f18_branch(insn, bus),        // F16 条件跳转 + F17 SWI
+            56..=59 => self.thumb_f18_branch(insn, bus),        // F18：无条件跳转
             _ => self.thumb_f19_long_branch(insn),              // 60..=63：F19
         }
     }
@@ -349,9 +347,9 @@ impl Cpu {
 
     /// F9：`LDR/STR/LDRB/STRB Rd, [Rb, #imm5×4|×1]`——立即数偏移。
     fn thumb_f9_load_store_imm(&mut self, insn: u16, bus: &mut Bus) {
-        let op = (insn >> 11) & 0x3; // 00=STR, 01=STRB, 10=LDR, 11=LDRB
-        let byte = op & 1 != 0;
-        let load = op >= 2;
+        let op = (insn >> 11) & 0x3; // 00=STR, 01=LDR, 10=STRB, 11=LDRB
+        let byte = op >= 2;
+        let load = op & 1 != 0;
         let offset = u32::from((insn >> 6) & 0x1F) * if byte { 1 } else { 4 };
         let rb = ((insn >> 3) & 0x7) as usize;
         let rd = (insn & 0x7) as usize;
@@ -396,8 +394,8 @@ impl Cpu {
         }
     }
 
-    /// F12：`ADD Rd, PC/SP, #imm8×4`；F13：`ADD SP, #±imm7×4`。
-    fn thumb_f12_13_load_address(&mut self, insn: u16) {
+    /// F12：`ADD Rd, PC/SP, #imm8×4`。
+    fn thumb_f12_load_address(&mut self, insn: u16) {
         let sp = insn & (1 << 11) != 0;
         let rd = ((insn >> 8) & 0x7) as usize;
         let imm = u32::from(insn & 0xFF);
@@ -407,6 +405,16 @@ impl Cpu {
         } else {
             // F12 的 PC 形式：取 PC 相对地址到寄存器（同样按字对齐）
             self.regs[rd] = (self.regs[15] & !2).wrapping_add(imm * 4);
+        }
+    }
+
+    /// F13：`ADD/SUB SP, #imm7×4`（0xB000 = 加、0xB080 = 减，不影响标志位）。
+    fn thumb_f13_add_sub_sp(&mut self, insn: u16) {
+        let imm = u32::from(insn & 0x7F) * 4;
+        if insn & (1 << 7) != 0 {
+            self.regs[13] = self.regs[13].wrapping_sub(imm);
+        } else {
+            self.regs[13] = self.regs[13].wrapping_add(imm);
         }
     }
 
@@ -497,10 +505,11 @@ impl Cpu {
         crate::bios::hle_swi(self, bus, u32::from(insn & 0xFF));
     }
 
-    /// F16：条件跳转（0xD000 区，`>>10`=52..54，cond 在位 11–8）；
-    /// F18：无条件跳转（0xE000 区，`>>10`=56..59，11 位补码偏移 ×2）。
+    /// F16：条件跳转（0xD000 区，`>>10`=52..=55，cond 在位 11–8；cond=0xF 即
+    /// 0xDF00 区的 SWI）；
+    /// F18：无条件跳转（0xE000 区，`>>10`=56..=59，11 位补码偏移 ×2）。
     /// 两个区间不可能重叠，用 `>>11` 的 11100 判别无条件形式。
-    fn thumb_f18_branch(&mut self, insn: u16) {
+    fn thumb_f18_branch(&mut self, insn: u16, bus: &mut Bus) {
         if (insn >> 11) & 0x1F == 0b11100 {
             // F18 无条件：11 位补码偏移 ×2（范围 ±2 KB）
             let offset = alu::sign_extend(u32::from(insn & 0x7FF), 11) * 2;
@@ -509,6 +518,10 @@ impl Cpu {
         }
         // F16 条件跳转：cond 在位 11–8，偏移 8 位补码 ×2（范围 ±256 B）
         let cond = u32::from((insn >> 8) & 0xF);
+        if cond == 0xF {
+            self.thumb_f17_swi(insn, bus);
+            return;
+        }
         if cond != 0xE && cond_pass(cond, self.cpsr) {
             let offset = alu::sign_extend(u32::from(insn & 0xFF), 8) * 2;
             self.write_pc_thumb(self.regs[15].wrapping_add(offset as u32));
@@ -608,6 +621,59 @@ mod tests {
         // MUL r0, r1：格式 4，op=1101 → 0x4348
         cpu.thumb_step(0x4348, &mut bus);
         assert_eq!(cpu.reg(0), 42);
+    }
+
+    #[test]
+    fn f13_add_sub_sp_leaves_registers_alone() {
+        let (mut cpu, mut bus) = setup_thumb();
+        cpu.regs[13] = 0x0300_7E10;
+        cpu.regs[0] = 0x1234_5678;
+        // SUB SP, #4（0xB081）——曾被误路由到 F12 的 PC 形式，
+        // 执行成"r0 = PC 相对地址"而污染调用者的寄存器
+        cpu.thumb_step(0xB081, &mut bus);
+        assert_eq!(cpu.reg(13), 0x0300_7E0C);
+        assert_eq!(cpu.reg(0), 0x1234_5678);
+        // ADD SP, #0x100（0xB040）
+        cpu.thumb_step(0xB040, &mut bus);
+        assert_eq!(cpu.reg(13), 0x0300_7F0C);
+        // F12 的 SP 形式不受影响：ADD r0, SP, #8（0xA802）
+        cpu.thumb_step(0xA802, &mut bus);
+        assert_eq!(cpu.reg(0), 0x0300_7F14);
+    }
+
+    #[test]
+    fn f9_word_load_and_byte_store() {
+        let (mut cpu, mut bus) = setup_thumb();
+        bus.write_u32(0x0200_0000, 0xDEAD_BEEF);
+        cpu.regs[1] = 0x0200_0000;
+        // LDR r0, [r1]（0x6808）——曾被解码成"字节存储"而破坏内存
+        cpu.thumb_step(0x6808, &mut bus);
+        assert_eq!(cpu.reg(0), 0xDEAD_BEEF);
+        assert_eq!(bus.read_u32(0x0200_0000), 0xDEAD_BEEF);
+        // STRB r0, [r1, #1]（0x7048）——曾被解码成"字加载"
+        cpu.regs[0] = 0x5A;
+        cpu.thumb_step(0x7048, &mut bus);
+        assert_eq!(bus.read_u8(0x0200_0001), 0x5A);
+        assert_eq!(bus.read_u32(0x0200_0000), 0xDEAD_5AEF);
+        // LDRB r2, [r1, #1]（0x784A）
+        cpu.thumb_step(0x784A, &mut bus);
+        assert_eq!(cpu.reg(2), 0x5A);
+        // STR r3, [r1, #4]（0x604B）
+        cpu.regs[3] = 0x1234_5678;
+        cpu.thumb_step(0x604B, &mut bus);
+        assert_eq!(bus.read_u32(0x0200_0004), 0x1234_5678);
+    }
+
+    #[test]
+    fn f16_gt_branch_is_not_swi() {
+        let (mut cpu, mut bus) = setup_thumb();
+        cpu.regs[1] = 35;
+        // SUB r1, #1（0x3901）→ Z=0 N=0 V=0 → GT 成立
+        cpu.thumb_step(0x3901, &mut bus);
+        // BGT -8（0xDCF8）——曾被路由进 SWI 组
+        cpu.regs[15] = 0x0800_0100 + 8; // 指令地址 0x08000104
+        cpu.thumb_step(0xDCF8, &mut bus);
+        assert_eq!(cpu.reg(15), 0x0800_00F8 + 4);
     }
 
     #[test]

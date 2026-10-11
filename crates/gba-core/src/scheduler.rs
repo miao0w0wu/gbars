@@ -153,12 +153,12 @@ mod tests {
         bus.write_u16(0x0400_0004, 0x0008);
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
-        assert_eq!(bus.io.read_u16(0x0202) & 0x1, 0x1);
+        assert_eq!(bus.io.read_u16(0x0202, 0) & 0x1, 0x1);
 
         let (mut cpu, mut bus) = spin();
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
-        assert_eq!(bus.io.read_u16(0x0202) & 0x1, 0x0);
+        assert_eq!(bus.io.read_u16(0x0202, 0) & 0x1, 0x0);
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod tests {
         bus.write_u16(0x0400_0004, 0x0010);
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
-        assert_eq!(bus.io.read_u16(0x0202) & 0x2, 0x2);
+        assert_eq!(bus.io.read_u16(0x0202, 0) & 0x2, 0x2);
     }
 
     #[test]
@@ -177,7 +177,7 @@ mod tests {
         bus.write_u16(0x0400_0102, 0x00C0);
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
-        assert_eq!(bus.io.read_u16(0x0202) & 0x8, 0x8);
+        assert_eq!(bus.io.read_u16(0x0202, 0) & 0x8, 0x8);
     }
 
     #[test]
@@ -186,10 +186,10 @@ mod tests {
         for i in 0..192u32 {
             bus.write_u16(0x0200_0000 + i * 2, 0x5000 + i as u16);
         }
-        bus.write_u32(0x0400_00DC, 0x0200_0000);
-        bus.write_u32(0x0400_00E0, 0x0200_0200);
-        bus.write_u16(0x0400_00E4, 1);
-        bus.write_u16(0x0400_00E6, 0xA200);
+        bus.write_u32(0x0400_00D4, 0x0200_0000);
+        bus.write_u32(0x0400_00D8, 0x0200_0200);
+        bus.write_u16(0x0400_00DC, 1);
+        bus.write_u16(0x0400_00DE, 0xA200);
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
         for j in [0u32, 1, 80, 159] {
@@ -206,10 +206,10 @@ mod tests {
     fn vblank_dma_fires_at_line_160() {
         let (mut cpu, mut bus) = spin();
         bus.write_u16(0x0200_0000, 0x1234);
-        bus.write_u32(0x0400_00DC, 0x0200_0000);
-        bus.write_u32(0x0400_00E0, 0x0200_0100);
-        bus.write_u16(0x0400_00E4, 1);
-        bus.write_u16(0x0400_00E6, 0x9000);
+        bus.write_u32(0x0400_00D4, 0x0200_0000);
+        bus.write_u32(0x0400_00D8, 0x0200_0100);
+        bus.write_u16(0x0400_00DC, 1);
+        bus.write_u16(0x0400_00DE, 0x9000);
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
         assert_eq!(bus.read_u16(0x0200_0100), 0x1234);

@@ -20,6 +20,7 @@ pub struct Io {
     /// 完成时硬件清掉 SIOCNT 的 start 位并置起 IF 的 SIO 位（bit7）。
     sio_shift_remaining: u32,
     siocnt: u16,
+    open_bus: [u16; 0x200],
 }
 
 /// 一次 8 位内部时钟移位的周期数（GBATEK：内部时钟 256 周期/位）。
@@ -38,6 +39,7 @@ impl Io {
             waitcnt: 0,
             sio_shift_remaining: 0,
             siocnt: 0,
+            open_bus: [0; 0x200],
         }
     }
 
@@ -76,8 +78,12 @@ impl Io {
         self.ime
     }
 
-    pub fn read_u8(&self, addr: u32) -> u8 {
-        let v = self.read_u16(addr & !1);
+    pub fn open_bus_at(&self, addr: u32) -> u16 {
+        self.open_bus[((addr & 0x3FE) >> 1) as usize]
+    }
+
+    pub fn read_u8(&self, addr: u32, open_bus: u16) -> u8 {
+        let v = self.read_u16(addr & !1, open_bus);
         if addr & 1 == 0 {
             v as u8
         } else {
@@ -85,7 +91,16 @@ impl Io {
         }
     }
 
-    pub fn read_u16(&self, addr: u32) -> u16 {
+    pub fn read_u16(&self, addr: u32, open_bus: u16) -> u16 {
+        self.reg_or(addr, open_bus)
+    }
+
+    fn read_u16_scratch(&self, addr: u32) -> u16 {
+        let a = addr & 0x3FE;
+        self.reg_or(addr, self.open_bus[(a >> 1) as usize])
+    }
+
+    fn reg_or(&self, addr: u32, fallback: u16) -> u16 {
         match addr & 0x3FE {
             0x000 => self.ppu.dispcnt(),
             0x004 => self.ppu.dispstat(),
@@ -102,30 +117,30 @@ impl Io {
             0x106 => self.timers.timer[1].ctrl,
             0x10A => self.timers.timer[2].ctrl,
             0x10E => self.timers.timer[3].ctrl,
-            0x0B8 => self.dma.channel[0].src as u16,
-            0x0BA => (self.dma.channel[0].src >> 16) as u16,
-            0x0BC => self.dma.channel[0].dst as u16,
-            0x0BE => (self.dma.channel[0].dst >> 16) as u16,
-            0x0C0 => self.dma.channel[0].count,
-            0x0C2 => self.dma.channel[0].ctrl,
-            0x0C4 => self.dma.channel[1].src as u16,
-            0x0C6 => (self.dma.channel[1].src >> 16) as u16,
-            0x0C8 => self.dma.channel[1].dst as u16,
-            0x0CA => (self.dma.channel[1].dst >> 16) as u16,
-            0x0CC => self.dma.channel[1].count,
-            0x0CE => self.dma.channel[1].ctrl,
-            0x0D0 => self.dma.channel[2].src as u16,
-            0x0D2 => (self.dma.channel[2].src >> 16) as u16,
-            0x0D4 => self.dma.channel[2].dst as u16,
-            0x0D6 => (self.dma.channel[2].dst >> 16) as u16,
-            0x0D8 => self.dma.channel[2].count,
-            0x0DA => self.dma.channel[2].ctrl,
-            0x0DC => self.dma.channel[3].src as u16,
-            0x0DE => (self.dma.channel[3].src >> 16) as u16,
-            0x0E0 => self.dma.channel[3].dst as u16,
-            0x0E2 => (self.dma.channel[3].dst >> 16) as u16,
-            0x0E4 => self.dma.channel[3].count,
-            0x0E6 => self.dma.channel[3].ctrl,
+            0x0B0 => self.dma.channel[0].src as u16,
+            0x0B2 => (self.dma.channel[0].src >> 16) as u16,
+            0x0B4 => self.dma.channel[0].dst as u16,
+            0x0B6 => (self.dma.channel[0].dst >> 16) as u16,
+            0x0B8 => self.dma.channel[0].count,
+            0x0BA => self.dma.channel[0].ctrl,
+            0x0BC => self.dma.channel[1].src as u16,
+            0x0BE => (self.dma.channel[1].src >> 16) as u16,
+            0x0C0 => self.dma.channel[1].dst as u16,
+            0x0C2 => (self.dma.channel[1].dst >> 16) as u16,
+            0x0C4 => self.dma.channel[1].count,
+            0x0C6 => self.dma.channel[1].ctrl,
+            0x0C8 => self.dma.channel[2].src as u16,
+            0x0CA => (self.dma.channel[2].src >> 16) as u16,
+            0x0CC => self.dma.channel[2].dst as u16,
+            0x0CE => (self.dma.channel[2].dst >> 16) as u16,
+            0x0D0 => self.dma.channel[2].count,
+            0x0D2 => self.dma.channel[2].ctrl,
+            0x0D4 => self.dma.channel[3].src as u16,
+            0x0D6 => (self.dma.channel[3].src >> 16) as u16,
+            0x0D8 => self.dma.channel[3].dst as u16,
+            0x0DA => (self.dma.channel[3].dst >> 16) as u16,
+            0x0DC => self.dma.channel[3].count,
+            0x0DE => self.dma.channel[3].ctrl,
             0x048 => self.ppu.winin(),
             0x04A => self.ppu.winout(),
             0x050 => self.ppu.bldcnt(),
@@ -140,12 +155,12 @@ impl Io {
             0x202 => self.irq_flag,
             0x204 => self.waitcnt,
             0x208 => self.ime,
-            _ => self.ppu.read_reg(addr & 0x3FE),
+            _ => self.ppu.read_reg(addr & 0x3FE).unwrap_or(fallback),
         }
     }
 
     pub fn write_u8(&mut self, addr: u32, value: u8) -> Option<usize> {
-        let cur = self.read_u16(addr & !1);
+        let cur = self.read_u16_scratch(addr & !1);
         let merged = if addr & 1 == 0 {
             (cur & 0xFF00) | u16::from(value)
         } else {
@@ -163,6 +178,7 @@ impl Io {
 
     /// 返回 Some(ch) 表示该写触发了一次立即 DMA 传输（由 Bus 执行搬运）。
     pub fn write_u16(&mut self, addr: u32, value: u16) -> Option<usize> {
+        self.open_bus[((addr & 0x3FE) >> 1) as usize] = value;
         let trigger: Option<usize> = match addr & 0x3FE {
             0x000 => {
                 self.ppu.write_dispcnt(value);
@@ -220,106 +236,106 @@ impl Io {
                 self.timers.write_ctrl(3, value);
                 None
             }
-            0x0B8 => {
+            0x0B0 => {
                 self.dma.channel[0].src =
                     (self.dma.channel[0].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0BA => {
+            0x0B2 => {
                 self.dma.channel[0].src =
                     (self.dma.channel[0].src & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0BC => {
+            0x0B4 => {
                 self.dma.channel[0].dst =
                     (self.dma.channel[0].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0BE => {
+            0x0B6 => {
                 self.dma.channel[0].dst =
                     (self.dma.channel[0].dst & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0C0 => {
+            0x0B8 => {
                 self.dma.channel[0].count = value;
                 None
             }
-            0x0C2 => self.write_dma_ctrl(0, value),
-            0x0C4 => {
+            0x0BA => self.write_dma_ctrl(0, value),
+            0x0BC => {
                 self.dma.channel[1].src =
                     (self.dma.channel[1].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0C6 => {
+            0x0BE => {
                 self.dma.channel[1].src =
                     (self.dma.channel[1].src & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0C8 => {
+            0x0C0 => {
                 self.dma.channel[1].dst =
                     (self.dma.channel[1].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0CA => {
+            0x0C2 => {
                 self.dma.channel[1].dst =
                     (self.dma.channel[1].dst & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0CC => {
+            0x0C4 => {
                 self.dma.channel[1].count = value;
                 None
             }
-            0x0CE => self.write_dma_ctrl(1, value),
-            0x0D0 => {
+            0x0C6 => self.write_dma_ctrl(1, value),
+            0x0C8 => {
                 self.dma.channel[2].src =
                     (self.dma.channel[2].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0D2 => {
+            0x0CA => {
                 self.dma.channel[2].src =
                     (self.dma.channel[2].src & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0D4 => {
+            0x0CC => {
                 self.dma.channel[2].dst =
                     (self.dma.channel[2].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0D6 => {
+            0x0CE => {
                 self.dma.channel[2].dst =
                     (self.dma.channel[2].dst & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0D8 => {
+            0x0D0 => {
                 self.dma.channel[2].count = value;
                 None
             }
-            0x0DA => self.write_dma_ctrl(2, value),
-            0x0DC => {
+            0x0D2 => self.write_dma_ctrl(2, value),
+            0x0D4 => {
                 self.dma.channel[3].src =
                     (self.dma.channel[3].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0DE => {
+            0x0D6 => {
                 self.dma.channel[3].src =
                     (self.dma.channel[3].src & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0E0 => {
+            0x0D8 => {
                 self.dma.channel[3].dst =
                     (self.dma.channel[3].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
-            0x0E2 => {
+            0x0DA => {
                 self.dma.channel[3].dst =
                     (self.dma.channel[3].dst & 0x0000_FFFF) | (u32::from(value) << 16);
                 None
             }
-            0x0E4 => {
+            0x0DC => {
                 self.dma.channel[3].count = value;
                 None
             }
-            0x0E6 => self.write_dma_ctrl(3, value),
+            0x0DE => self.write_dma_ctrl(3, value),
             0x048 => {
                 self.ppu.write_winin(value);
                 None

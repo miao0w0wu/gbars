@@ -161,24 +161,25 @@ impl Ppu {
     }
 
     /// 未在 [`crate::io`] 显式分发的 PPU 寄存器（滚动/仿射/窗口/马赛克）。
-    pub fn read_reg(&self, addr: u32) -> u16 {
+    /// `None` = 该地址不属于 PPU，由调用方决定开总线行为。
+    pub fn read_reg(&self, addr: u32) -> Option<u16> {
         match addr {
-            0x010..=0x016 => self.bghofs[((addr - 0x010) / 2) as usize],
-            0x018..=0x01E => self.bgvofs[((addr - 0x018) / 2) as usize],
+            0x010..=0x016 => Some(self.bghofs[((addr - 0x010) / 2) as usize]),
+            0x018..=0x01E => Some(self.bgvofs[((addr - 0x018) / 2) as usize]),
             0x020..=0x02E => {
                 let reg = (((addr - 0x020) % 0x10) / 2) as usize;
-                self.read_affine_reg(0, reg)
+                Some(self.read_affine_reg(0, reg))
             }
             0x030..=0x03E => {
                 let reg = (((addr - 0x030) % 0x10) / 2) as usize;
-                self.read_affine_reg(1, reg)
+                Some(self.read_affine_reg(1, reg))
             }
-            0x040 => self.winh[0],
-            0x042 => self.winh[1],
-            0x044 => self.winv[0],
-            0x046 => self.winv[1],
-            0x048 => self.mosaic,
-            _ => 0,
+            0x040 => Some(self.winh[0]),
+            0x042 => Some(self.winh[1]),
+            0x044 => Some(self.winv[0]),
+            0x046 => Some(self.winv[1]),
+            0x048 => Some(self.mosaic),
+            _ => None,
         }
     }
 
