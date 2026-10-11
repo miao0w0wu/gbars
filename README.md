@@ -17,8 +17,8 @@
 ## 里程碑进度
 
 - [x] **M0 骨架** —— workspace、卡带装载与头部解析、帧契约、headless CLI
-- [x] **M1 CPU** —— ARM + Thumb 指令集与 SWI HLE 全部落地；59 测试全绿。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
-- [ ] **M2 图形**（进行中）—— 调度器、PPU 全模式渲染、定时器、DMA、中断投递主体已落地（工作区待提交）；剩余：修复 clippy/fmt 基线、PPU 渲染输出为纯色待排查、M2 模块补测试、FireRed 标题画面验收。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
+- [x] **M1 CPU** —— ARM + Thumb 指令集与 SWI HLE 全部落地。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
+- [ ] **M2 图形**（进行中）—— PPU 全模式渲染可输出正确画面（ArmWrestler 菜单验收通过）；83 测试全绿。剩余：FireRed 引导推进至标题画面（当前卡在未映射 IO 开总线行为）、mGBA 同帧对拍。详见 [docs/HANDOFF.md](docs/HANDOFF.md)
 - [ ] **M3 系统** —— 中断 / 定时器 / DMA、Flash 128KB 存档
 - [ ] **M4 音频** —— PSG 四通道 + DirectSound FIFO
 - [ ] **M5 前端整合** —— Tauri 线程模型 + IPC + MUI 界面

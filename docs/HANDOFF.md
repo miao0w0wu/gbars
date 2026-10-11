@@ -1,19 +1,21 @@
 # 交接文档（HANDOFF）
 
 > 写给接手的 AI 或开发者：读完这一篇即可无缝继续。
-> 最后更新：2026-10-10（M2 中期状态）。
+> 最后更新：2026-10-11（M2 收尾状态：PPU 验收已过，FireRed 引导卡在随机种子循环，根因已定位）。
 
 ## 0. 一句话现状
 
 GBA 模拟器项目 **gbars** 位于 `D:\project\rust\gbars\`。
-**M0（骨架）与 M1（ARM/Thumb 全指令 + SWI HLE）已完成并提交**；
-**M2（图形）的主体代码已写完但未提交**：调度器、PPU 全模式渲染管线、定时器、DMA、
-IO 寄存器层、中断投递（含 BIOS IRQ 桩）均已落地，`cargo test` 59 个测试全绿，
-但 **clippy/fmt 基线当前是红的（2 处 cast 警告 + 1 处格式），且 PPU 输出画面为纯色
-（渲染内容未出来），M2 新模块一个单元测试都没写**。
+**M0/M1 已提交**；M2 图形主体已在 `9078372` 提交；本次会话在 `e85a92d`（仓库清理）
+与 `22148de`（9 处真 bug 修复 + DMA 触发补齐 + 24 个新测试）落地。
+**`cargo test` 83 全绿、clippy `-D warnings` 与 fmt 全绿。**
 
-git 已有 4 次提交（HEAD = `4fdc80b`），上述 M2 工作全部停留在工作区（9 个修改文件
-+ 6 个新增文件）。
+- **ArmWrestler 菜单画面渲染正确**（标题/署名/测试菜单/橙色光标，M2 PPU 验收核心缺口已闭合）；
+- **FireRed 跑 300 帧不崩**，但引导停在 0x081E3568 的"写 0x83 → 轮询 [0x04000118] 直到 > 0x1F"
+  随机种子循环——根因已定位：**未映射 IO 区缺"写入暂存 + 读回"的开总线行为**
+  （mGBA 把 16 位写统一存进 io[] 数组、读回原值；我们丢弃写、读恒 0），下一步补上即可继续推进。
+
+工作区干净，以上全部已提交。HEAD = `22148de`，未推送（origin/main 在 `9078372`）。
 
 ## 1. 项目背景与约定（必须遵守）
 
@@ -21,11 +23,12 @@ git 已有 4 次提交（HEAD = `4fdc80b`），上述 M2 工作全部停留在�
 |---|---|
 | 目标 | 用 Rust 写 GBA 模拟器（核心纯库）+ Tauri 2 + React + MUI 前端，最终完整运行 `D:\Games\gba roms\Pokemon.gba`（**Pokemon FireRed 美版 v1.1**，BPRE，存档类型 Flash 128KB/`FLASH1M_V103`，无 RTC） |
 | 设计方案 | `docs/design.md`（权威版；架构、IPC 协议、M0–M6 里程碑表） |
-| **代码/文档约定（用户硬性要求，2026-10-10 起）** | **① 不写任何代码注释（含模块头 `//!` 与行内注释）；② 不写解释文档，不再产出 `docs/notes/`。** 此前"中文教学注释 + 每步五段说明文档"的约定已作废。`docs/notes/` 下既有文档与现有代码注释**原样保留、不回头清理**；讲解工作由用户在项目完成后交给其他智能体统一处理 |
-| 工程基线（每次交付必须全绿） | `cargo fmt --check`；`cargo test`；`cargo clippy --workspace --all-targets -- -D warnings` |
+| **代码/文档约定（用户硬性要求，2026-10-10 起）** | **① 不写任何代码注释（含模块头 `//!` 与行内注释）；② 不写解释文档，不再产出 `docs/notes/`。** 既有注释/文档保留不动。正确性由测试与 FireRed 验收保证 |
+| 工程基线（每次交付必须全绿） | `cargo fmt --check`；`cargo test`（当前 83 个）；`cargo clippy --workspace --all-targets -- -D warnings` |
 | 工具链 | rustc/cargo 1.99.0、edition 2024、node v24、pnpm 12 |
-| mGBA 源码 | 已克隆在 `D:\project\rust\mgba`（实现时按主题对照：`src/arm/` CPU、`src/gba/bios.c` SWI HLE、`src/gba/memory.c` 总线、`src/gba/hle-bios.s` 引导状态） |
-| **环境坑** | 本环境有安全钩子：**禁止用 bash（sed/echo 等）直接写源码文件**，必须用 Write/Edit 工具 |
+| mGBA 源码 | 已克隆在 `D:\project\rust\mgba`（`src/gba/video.c`、`io.c`、`dma.c`、`timer.c`、`sio.c`、`renderers/video-software.c`、`include/mgba/internal/gba/dma.h`、`io.h`） |
+| **环境坑 1** | 安全钩子**禁止用 bash（sed/echo 等）直接写源码文件**，必须用 Write/Edit 工具 |
+| **环境坑 2** | Git Bash 里 `cargo run ... \| head` 偶发吞 stdout——重定向到文件再 grep 可靠 |
 
 ## 2. 目录与文件地图
 
@@ -36,166 +39,176 @@ gbars/
 ├── docs/
 │   ├── design.md                    # 设计方案（权威）
 │   └── HANDOFF.md                   # ← 本文
-├── test-roms/armwrestler.gba        # CPU 测试 ROM（16,936 B，非商业）
+├── test-roms/armwrestler.gba        # CPU 测试 ROM
 └── crates/gba-core/src/
     ├── lib.rs                       # 门面 + 模块地图
     ├── cartridge.rs                 # ROM 装载与头部解析（M0）
     ├── frame.rs                     # 帧契约 240×160 RGBA8888（M0）
-    ├── bus.rs                       # 内存总线 + IRQ 桩注入（M1/M2）
-    ├── gba.rs                       # GameBoyAdvance 门面 + run_frame()（M1/M2）
-    ├── bios.rs                      # SWI HLE（M1；IntrWait 已改真语义）
-    ├── scheduler.rs                 # ★M2 新增：统一时钟与扫描线调度
-    ├── io.rs                        # ★M2 新增：0x04000000 I/O 寄存器层（含 SIO 移位）
-    ├── timer.rs                     # ★M2 新增：4×16 位定时器（分频/级联）
-    ├── dma.rs                       # ★M2 新增：4 通道 DMA（立即/VBlank/HBlank 触发）
+    ├── bus.rs                       # 内存总线 + IRQ 桩（0x18 = b 0x120）+ run_dma_triggers
+    ├── gba.rs                       # GameBoyAdvance 门面 + run_frame()
+    ├── bios.rs                      # SWI HLE（CpuSet fill 已改真语义）
+    ├── scheduler.rs                 # 统一时钟；run_frame/run_instruction/now()
+    ├── io.rs                        # 0x04000000 寄存器层；SIOCNT 已挂 0x128
+    ├── timer.rs                     # 4×16 位定时器（分频/级联/溢出 IRQ）
+    ├── dma.rs                       # 4 通道 DMA（立即/VBlank/HBlank、repeat、dst 重载）
     ├── ppu/
-    │   ├── mod.rs                   # ★M2 新增：PPU 主体（寄存器/扫描线缓存）
-    │   ├── background.rs            # ★M2 新增：文本/仿射背景渲染
-    │   ├── bitmap.rs                # ★M2 新增：模式 3/4/5 位图渲染
-    │   ├── sprite.rs                # ★M2 新增：OBJ 渲染
-    │   ├── blending.rs              # ★M2 新增：亮度/alpha 混合
-    │   └── window.rs                # ★M2 新增：窗口区域判定
+    │   ├── mod.rs                   # PPU 主体；frame555 整帧行缓冲
+    │   ├── background.rs            # 文本（screen_base 按半字）+ 仿射背景
+    │   ├── bitmap.rs                # 模式 3/4/5
+    │   ├── sprite.rs                # OBJ
+    │   ├── blending.rs              # 亮度/alpha 混合
+    │   └── window.rs                # 窗口（全关 = 0x3F 全放行）
     └── cpu/
-        ├── mod.rs                   # 模式/银行/异常/PC 约定/step()（M2 补周期模型+中断投递）
+        ├── mod.rs                   # 模式/银行/异常/step()
         ├── alu.rs                   # 桶形移位器与标志位
-        ├── isa_arm.rs               # ARM 全指令
-        └── isa_thumb.rs             # Thumb 全 19 格式（F1/F9 译码边界已修正）
+        ├── isa_arm.rs               # ARM 全指令（category_000 判别已修正）
+        └── isa_thumb.rs             # Thumb 全 19 格式
 ```
 
-## 3. 已完成的工作
+## 3. 本次会话完成的工作
 
-### M0（骨架）——已提交
-ROM 载入 + 头部解析（`cartridge.rs`）、帧输出契约（`frame.rs`）、headless 示例、工程基线。
+### 3.1 仓库卫生与基线（e85a92d）
+- `9078372` 误把 `.mimosa/`（插件会话产物）和临时 `frame*.bmp` 提交进仓库，已移除并加入 .gitignore；
+- 修掉 dma.rs 两处 `unnecessary_cast` 与全部 fmt diff，恢复绿基线。
 
-### M1 CPU（ARM/Thumb 全指令 + SWI HLE）——已提交
-- CPU 为解释器，译码与执行分离；ARMv4T 全量 ARM 与 Thumb（19 格式）。
-- 无 BIOS 启动状态按 GBATEK/`hle-bios.s` 设定（PC=0x08000000、CPSR=0x1F、
-  各模式 SP、DISPCNT=0x0080、WAITCNT=0x4317）。
-- SWI HLE：`SoftReset`、`RegisterRamReset`、`Div/DivArm`、`Sqrt`、`ArcTan(2)`、
-  `CpuSet/CpuFastSet`、`BgAffineSet/ObjAffineSet`、`BitUnPack`、LZ77/RL/Huffman 解压、
-  `MidiKey2Freq`；Sound driver 系列（0x16–0x1E）no-op。
-- 已知实现局限：Huffman 仅支持 bits ∈ {2,4,8}、尾部不足 4 字节未写回；
-  BitUnPack 仅支持目标位宽 8/16/32。
+### 3.2 修复九处真 bug（22148de）——按因果链排序
 
-### M2 图形（工作区未提交，主体已完成）
-- **调度器**（`scheduler.rs`）：280,896 周期/帧（228 线 × 1232），CPU 逐指令执行、
-  沿扫描线边界渲染并推进定时器；DISPSTAT 的 VBlank/HBlank 标志与对应中断按行投递。
-- **周期模型**：CPU `charge/take_cycles`，取指按 `Bus::access_cycles` 计费，
-  数据访问周期由总线累计（`take_data_cycles`）；Halt 睡眠期按 1 周期/步推进。
-- **PPU**（`ppu/`）：DISPCNT/DISPSTAT/VCOUNT/BG 控制与滚动/仿射参数/窗口/混合寄存器
-  全量接进 `io.rs`；文本背景（4bpp/8bpp、多屏基）、仿射背景（参考点每线推进）、
-  位图模式 3/4/5、OBJ（普通/仿射、半透明）、窗口、亮度/alpha 混合各成一体；
-  逐线渲染进 `line/line_layer/line_second` 缓存，`capture_frame` 整帧拷入 `Frame`。
-- **中断投递**：IO 层维护 IE/IF/IME 与 `request_irq/clear_irq`；CPU 每步之后
-  `service_irq`（IME 开 && IE&IF≠0 且 I 标志未屏蔽 → 清 Halt → 进入 IRQ 异常）。
-  BIOS 内存注入了 mGBA `hle-bios.s` irqBase 的机器码桩（0x18 向量 → 0x120 入口：
-  保存寄存器 → 经 0x03FFFFFC 调游戏 handler → SUBS PC,LR,#4 返回），所以"无 BIOS"
-  也能真跑中断返回路径。IntrWait/VBlankIntrWait 已从 no-op 改为
-  "清 IF → 挂起（Halt）→ 等中断唤醒"的真语义。
-- **定时器**（`timer.rs`）：4×16 位、分频 1/64/256/1024、级联、溢出中断投递。
-- **DMA**（`dma.rs`）：4 通道、立即/VBlank/HBlank 触发、源/目标步进、半字/字；
-  `write_ctrl` 判定立即传输后由总线取走执行。
-- **IO 层**（`io.rs`）：0x04000000 窗口的寄存器读写分派 + SIO 内部时钟移位
-  （FireRed 引导靠 SIO 中断做随机种子，启动位写入后 256 周期/位移 8 位置 IF）。
-- **Thumb 译码修正**：F1 移位组原判 `0..=1` 漏了 LSR/ASR（应为 `0..=5`），
-  F9 立即数偏移组原判 `24..=27` 漏了 `28..=31`（应为 `24..=31`）。
-- **headless 示例扩展**：`--trace N` 单步调试输出；跑 N 帧输出 BMP + PPU/CPU 状态摘要；
-  `trace-io` feature（`Cargo.toml`）可打开 IO 写入追踪。
+| # | 文件 | 缺陷 | 后果/证据 |
+|---|---|---|---|
+| 1 | `cpu/isa_arm.rs` `category_000` | 位 7、4=1 的杂烩区**先判位 24**：后索引（P=0，位 24=0）的 LDRH/STRH 被当 UMULL 执行，基址寄存器被乘积清零 | ArmWrestler 字体 blitter 的 `LDRH r1,[r10],r2` 把 r10 清 0 → 所有 VRAM/调色板写落到地址 0 → 纯黑画面。**正确判别：先看位 6:5**——`00` = 乘法（位 24=0）或 SWP（位 24=1）；`01/10/11` = 半字族（与位 24 无关）。旧 HANDOFF §4.3 记的"位 24=0 → 乘法"就是这条错误规则，已废弃 |
+| 2 | `ppu/mod.rs` | `capture_frame` 对 160 行全部调 `write_line_to_frame(y)`，但 `ppu.line` 只保存最后渲染的一行（VBlank 期 160–227 行不渲染） | 整帧 = 第 159 行复制 160 份。新增 `frame555: Vec<u16>`（240×160），`render_line` 完即留档 |
+| 3 | `ppu/window.rs` | 三个窗口使能全关时用 WINOUT（复位值 0）做全屏掩码 → 所有图层被拒 | 只剩 palette[0] 黑底。真机/mGBA（video-software.c `control.packed = 0xFF`）：窗口全关 = 全放行，WINOUT 不参与 |
+| 4 | `dma.rs` 步进 | `delta(bits) * unit / 2`：半字传输每单元只走 1 字节 | 传输尾寄存器 0x0200_0101（应为 0x102）。正确：`delta * unit`，unit 已是字节数 |
+| 5 | `ppu/background.rs` 文本 BG | `screen_base = SC * 0x800`（字节）后又 `map_offset * 2`，screenbase≠0 时地址翻倍 | screenbase=0 的测试掩盖了它。文本路径 entry 读是半字，`screen_base` 应按 `SC * 0x400`；仿射路径按字节读、保持 `* 0x800` 不变——**两条路径单位不同，别"统一"** |
+| 6 | `bus.rs` IRQ 桩 | 0x18 向量用 `LDR PC,[PC,#-8]`：0x18 处可见 PC=0x20，-8 读到**自己这条指令**的字节 → 跳到 0xE51FF008 执行垃圾 | FireRed 第一次 IRQ 后 CPU 在野地址流浪（PC 每帧 +0x1124F0）。改为 mGBA hle-bios.s 原文：`b irqBase` = 0xEA000040（0x18 → 0x120） |
+| 7 | `bios.rs` CpuSet/CpuFastSet | fill 模式把 **r0 寄存器值**当填充值 | GBATEK/真机：fill 读 **[r0] 处内存**一次作为填充值。FireRed 初始化 IO 块（0x04000208 起 20 个半字）时被灌进指针垃圾，IE/IF/WAITCNT 大面积损坏 |
+| 8 | `io.rs` SIOCNT | 读写都挂在 **0x134**（RCNT 的地址）；0x128 无处理，读恒 0、写落 PPU 杂项；且无 start 位自动清零 | FireRed 写 SIOCNT=0x83 后轮询 start 位清零，永不退出。现在：0x128 读写接通、移位完成（2048 周期）清 bit7 并投递 SIO IRQ（IF bit7） |
+| 9 | `dma.rs` ch1/2 计数 | count=0 展开成 0x400 | GBATEK：ch1/2 = 0x4000。顺带补齐：repeat（触发型保持使能、仅 dst 模式 3 重载、count 寄存器即重载值）、完成 IRQ（ctrl bit14 → IF bit8-11）、立即触发永不 repeat |
 
-### 当前实测状态（2026-10-10）
-- `cargo test`：59 通过（与 M1 基线相同；**M2 新模块无任何测试**）。
-- `cargo clippy -D warnings`：**失败**——`dma.rs:66/67` 两处
-  `unnecessary_cast`（`unit as i32` 中 unit 已是 i32）。
-- `cargo fmt --check`：**有 diff**——`examples/headless.rs:128` 附近一行格式。
-- ArmWrestler 600 帧冒烟：不 panic、不卡死，PC=0x0800055c、4159 万步、
-  DISPCNT=0x0404（模式 4）、VCOUNT 正常推进；**但输出 BMP 为纯色单帧**
-  （当前代码输出纯黑，历史产物 frame300/600.bmp 是纯白——渲染内容未出来，
-  应显示屏幕测试文字）。重复运行输出逐字节一致（确定性 OK）。
-- 根目录 `frame300.bmp`/`frame600.bmp` 为临时产物，未入 .gitignore，待清理。
+### 3.3 补齐 VBlank/HBlank DMA 触发（原 M2 清单声称有、实际没有）
+- `Scheduler::advance`：可见行行尾调 `bus.run_dma_triggers(2)`（HBlank），第 160 行调 `run_dma_triggers(1)`（VBlank）——对齐 mGBA `_startHblank`/`_startVblank`（HBlank DMA 只在 0–159 行，渲染发生在 HBlank 起点，与我们"行尾渲染"近似一致）；
+- `Bus::run_dma_triggers(timing)` 统一执行并投递完成 IRQ；立即 DMA 完成同样投递。
+
+### 3.4 新增公共 API 与 24 个测试（59 → 83 全绿）
+- `Scheduler::run_instruction(cpu, bus)`：单指令 + 全部硬件副作用（定时器/IO/扫描线），
+  `Scheduler::now()` 读帧内周期——**逐指令调试的工具底座**（见 §5）；
+- 回归测试：后索引半字写回 + UMULL/SWP 判别（isa_arm）、整帧捕获、窗口全放行、
+  模式 0 文本（含 screenbase≠0）、模式 4 双页、OBJ 同优先级覆盖；
+- timer 5 个（分频/累加相位/使能边沿重载/级联/级联忽略分频）；
+- dma 5 个（立即拷贝/字宽固定 dst/count=0 展开/repeat 存活/dst 模式 3 重载）；
+- scheduler 7 个（227 行 + DISPSTAT=0x0003/VBlank 标志在 160 行翻转/IRQ 门控/HBlank IRQ/
+  定时器溢出 IRQ/HBlank DMA 每行 160 次/VBlank DMA 第 160 行一次）。
+
+### 3.5 FireRed 引导排查实录（未完，详见 §6.1）
+
+- 300 帧冒烟不再 panic；第 0 帧末 PC=0x081E3BF6（Thumb，ROM，crt0 正常）；
+- crt0 经 SWI 跳转表（0x081E3BD0=CpuFastSet/0x081E3BD4=CpuSet/0x081E3BD8=Div…，
+  每项 `SWI NN; BX LR`）逐段复制 IWRAM/WRAM，BL 目标与返回地址经验证**正确**；
+- 当前卡点：0x081E3568–0x081E3570 的 Thumb 循环
+  `MOV r0,#0x83; STRH r0,[r4]; LDRH r0,[r4]; CMP r0,#0x1F; BLS 回`，
+  **r4 = 0x04000118**（r5=0x3F，r6/r7=0）。真 SIOCNT(0x128)=0x5001 已配好
+  （Normal 模式/内部时钟/IRQ 使能），IE=0x0080、IF=0x0081、IME 此刻=0；
+- 0x04000118 在 mGBA `io.h` 与 GBATEK 里都不是命名寄存器（0x110–0x11E 属未映射区）。
+  游戏把它当"写完立刻能读回"的便签：写 0x83 后立刻读回（真机开总线 ≈ 刚驱动的值），
+  0x83 > 0x1F 退出循环作为随机种子。我们丢弃写、读恒 0 → 死循环；
+- **修复方案（下一步第一条）**：io.rs 为 0x04000000 窗口加一块原始 u16 暂存
+  （所有 16 位写先落数组，未命中专用寄存器的读回数组值；mGBA 语义），
+  注意别破坏现有寄存器的专用读路径。
 
 ## 4. 关键技术与"血泪教训"（改代码前必读）
 
 1. **PC 流水线硬约定**（全项目最重要）：
-   `regs[15]` 在执行指令期间**恒等于"读 PC 的硬件可见值"**：
-   ARM = 指令地址 + 8；Thumb = 指令地址 + 4。
-   取指地址 = `regs[15] - 8`（ARM）/ `- 4`（Thumb）。
-   **分支落地必须写 `目标 + 8/+4`** 以维持该约定（`write_pc_arm` / `write_pc_thumb` 是唯一出口）。
-2. **Thumb 译码按 `insn >> 10`（10 位组）**：F1 移位组占 `0..=5`、F2 加减占
-   `6..=7`、F9 占 `24..=31`——按"9 位组 + 单独位 10"判会漏格（M1 调试实录，
-   曾导致 LSR/ASR 与 STRH 区静默跑错）。
-3. **`category_000` 的判别（位 7、4 同时为 1 的杂烩区）**：
-   位 24 = 0 → 乘法；否则再看位 6-5：`00` = SWP/SWPB；`01/10/11` = LDRH/LDRSB/LDRSH。
-   绝不能只判一位。
+   `regs[15]` 在执行指令期间恒等于"读 PC 的硬件可见值"：ARM = 指令地址 + 8；Thumb = 指令地址 + 4。
+   取指地址 = `regs[15] - 8`（ARM）/ `- 4`（Thumb）。分支落地必须写 `目标 + 8/+4`（`write_pc_arm/thumb` 是唯一出口）。
+   **调试采样 PC 时同样要减偏移**——本次排查两次因把 reg(15) 当指令地址而误判
+   （"卡在 0x4EC 循环"实为 0x4DC 循环；SWI 检测差 4 字节险些冤枉 BL 译码）。
+2. **Thumb 译码按 `insn >> 10`（10 位组）**：F1 移位组占 `0..=5`、F2 加减占 `6..=7`、F9 占 `24..=31`。
+3. **ARM 杂烩区（位 7、4 同时为 1）判别（本次实测修正）**：**先判位 6:5**
+   ——`00` = 乘法族（位 24=0）或 SWP/SWPB（位 24=1）；`01/10/11` = LDRH/LDRSB/LDRSH 半字族，
+   **前索引与后索引都走这里**（后索引位 24=0，绝不能按位 24 优先分流，否则半字传输被当乘法执行、
+   基址寄存器被清零）。旧文档"位 24 = 0 → 乘法"的判法已证实是错的。
 4. **块传输统一算法**：寄存器恒按编号升序从 low 向上排；写回按 GBATEK 的 ULD 规则。
-5. **错误策略**：合法但未实现 → `CpuError::Unimplemented`；真机未定义编码 →
-   `enter_exception(0x04, Undefined)`。两者语义不同。
-6. **测试期望值必须手工演算**。历史上失败多为测试自己写错——先怀疑测试再怀疑实现。
+5. **错误策略**：合法但未实现 → `CpuError::Unimplemented`；真机未定义编码 → `enter_exception(0x04, Undefined)`。
+6. **测试期望值必须手工演算**。本次 12 个新测试初跑失败全部是测试自身错：
+   编码位段写错（0xE0D1_30B2 的位 22=1 是立即数偏移不是寄存器；UMULL 的 RdLo 在位 15:12、
+   RdHi 在位 19:16，位 7:4 必须 = 1001）、screenbase 编码错（0x0100 不是 0x0800）、
+   repeat 位（0x0200）误进非 repeat 用例、
+   **IO 地址字面量位数**：`0x0400_0C0` 只有 7 个十六进制位 = 0x004000C0，总线静默丢弃——
+   必须写 `0x0400_00C0`（下划线按 4 位一组数）。
 7. **总线怪癖**（`bus.rs`）：调色板/VRAM 背景区 8 位写复制进整个半字（OBJ 区不复制）；
-   OAM 忽略 8 位写；SRAM 宽读字节重复；镜像掩码规则；ROM 跨 0x0A 段镜像偏移。
-8. **M2 架构决定**：调色板/VRAM/OAM 移入 `Ppu` 持有（渲染器直读，总线转发并保留
-   位宽怪癖处理）；IRQ 桩以静态机器码注入 BIOS 内存（翻译自 mGBA `hle-bios.s`），
-   中断返回路径是真执行的指令而非回调——改 `bus.rs`/`cpu/mod.rs` 时注意别破坏。
-9. **调度近似**：当前按"整行事件"近似——HBlank 标志在行尾才置起、HDraw/HBlank
-   不再细分 960/272 周期；定时器在指令粒度推进。对多数游戏够用，
-   但依赖精确 HBlank 时机的效果（如某些光栅特效）会有偏差。
+   OAM 忽略 8 位写；SRAM 宽读字节重复；ROM 窗口外读 0（16MiB ROM + 0x01FFFFFF 窗口）。
+8. **M2 架构决定**：调色板/VRAM/OAM 移入 `Ppu` 持有；IRQ 桩以静态机器码注入 BIOS 内存
+   （0x18 向量 = `b 0x120`，翻译自 mGBA `hle-bios.s`）；改 `bus.rs`/`cpu/mod.rs` 时别破坏。
+9. **调度近似**：整行事件近似——HBlank 标志行尾置起、HDraw/HBlank 不细分 960/272；
+   定时器按指令粒度推进。依赖精确 HBlank 时机的光栅特效会有偏差。
+10. **DMA 单位**：`delta(bits) * unit` 就是字节数，没有 /2；count=0 的展开 ch0=0x40000、
+    ch1/2=0x4000、ch3=0x10000；repeat 触发型传完不关使能、dst 仅模式 3 重载
+    （基址在使能边沿捕获到 `dst_base`）、count 寄存器本身即重载值。
+11. **SWI 跳转表调试法**：FireRed 的 SWI 包装在 0x081E3BD0 起每 4 字节一项（`SWI NN; BX LR`），
+    逐指令跟踪时先确认执行地址再断言"调用了哪个 SWI"；CpuSet 的 r2：位 0-20 计数、
+    位 24 = fill（fill 读 [r0] 一次）、位 26 = 32 位。
+12. **排查顺序的方法论（本次验证有效）**：先看"数据到底写没写进去"（VRAM/调色板/IWRAM 非零字节计数）
+    → 再看"谁该写而没写"（逐指令跟踪寄存器演化）→ 最后才是渲染路径。
+    `Scheduler::run_instruction` + 帧回卷（`now() >= CYCLES_PER_FRAME` 时 `reset_frame()`）
+    可以做带时序的逐指令跟踪；临时探针放 `crates/gba-core/examples/probe.rs`，用完即删（本次已删）。
 
 ## 5. 验证与运行命令
 
 ```bash
 cd D:\project\rust\gbars
-cargo test                 # 59 通过（当前基线；M2 模块待补测试）
-cargo clippy --workspace --all-targets -- -D warnings   # 当前 2 处失败（dma.rs cast）
-cargo fmt --check          # 当前 1 处失败（headless.rs）
+cargo test                 # 83 通过（当前基线）
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check
 
-# 跑 N 帧输出 BMP + 状态摘要（冒烟/回归入口）
+# ArmWrestler 600 帧 → frame.bmp（现在应渲染出菜单文字）
 cargo run -p gba-core --example headless -- test-roms/armwrestler.gba 600 frame.bmp
 
-# 单步跟踪前 N 条指令（M2 调试用）
-cargo run -p gba-core --example headless -- test-roms/armwrestler.gba --trace 200000
+# FireRed 300 帧 → firered.bmp（当前仍纯色：引导未到开屏）
+cargo run -p gba-core --example headless -- "D:/Games/gba roms/Pokemon.gba" 300 firered.bmp
 
-# 无 ROM：输出 SMPTE 彩条 BMP（帧契约链路验证）
-cargo run -p gba-core --example headless
+# 单步跟踪（无时序，仅 CPU）
+cargo run -p gba-core --example headless -- test-roms/armwrestler.gba --trace 200000
 ```
+
+看 BMP 内容的土办法（无 PIL）：24 位 BMP 直接偏移 54 字节读像素、按 BGR 统计颜色数；
+或手写 zlib 转 PNG 后用 Read 工具看图（本次用它确认了 ArmWrestler 菜单渲染正确）。
 
 ## 6. 下一步任务清单（按顺序）
 
-1. **恢复绿基线**：修 `dma.rs:66/67` 的 `unnecessary_cast`（删掉 `as i32`）与
-   `headless.rs` 的格式 diff；跑 `cargo fmt` / `clippy` / `test` 全绿。
-2. **让 PPU 画出内容**（M2 验收核心缺口）：ArmWrestler 是模式 4 位图 + 自绘文字，
-   当前输出纯色说明 VRAM/调色板写入或 DISPCNT 位图渲染路径未生效。排查顺序：
-   a. 用 `--trace` + `trace-io` feature 看 VRAM（0x06000000+）与 DISPCNT 的写入
-      是否到达 PPU、DISPCNT 值是否含位图模式位；
-   b. 核对模式 4 的 8bpp 调色板读取与页翻转（DISPCNT 位 4）；
-   c. 对拍 mGBA 同 ROM 同帧截图（`D:\project\rust\mgba` 可构建 headless 截图）。
-3. **给 M2 模块补测试**：scheduler（行边界/VCOUNT/DISPSTAT）、timer（分频/级联/
-   溢出中断）、dma（触发方式/步进）、ppu（模式 0 文本、模式 4 位图、窗口/混合）。
-   工程约定：期望值手工演算，不加注释。
-4. **提交这批 M2 代码**（建议拆分：调度器+周期模型 / PPU+IO / 定时器+DMA+中断）。
-5. **FireRed 冒烟**：`cargo run -p gba-core --example headless -- "D:/Games/gba roms/Pokemon.gba" 300`，
-   M2 验收标准 = **进入标题画面且渲染正确**。
-6. **进入 M3**：中断控制器完善（Halt/IntrWait 唤醒已具备雏形）、按键 KEYINPUT、
-   EEPROM/Flash 128KB 存档。验收 = 新游戏 → 走入世界 → 存档重启可 CONTINUE。
-7. 按需更新 `README.md` 里程碑进度与本文件。
-
-> 注意：**不要再写解释文档、不要加代码注释**（新约定见 §1）。
+1. **未映射 IO 的开总线行为**（FireRed 引导当前卡点，方案见 §3.5）：
+   io.rs 加原始 u16 暂存数组，未命中专用寄存器的读写走"写即存、读即取"；
+   跑 FireRed 冒烟确认随机种子循环退出、引导继续推进。
+2. **继续 FireRed 引导**直到 DISPCNT 脱离 0x0080、IWRAM 0x03003580 出现 handler 代码、
+   进入 IntrWait 主循环，最终 300 帧内出标题画面（M2 验收）。
+   已知后续雷区：IntrWait/VBlankIntrWait 真语义已具备；中断返回路径（IRQ 桩 + SUBS PC,LR,#4）
+   在桩修复后尚未被 FireRed 实际走通过；handler 复制到 IWRAM 的动作尚未发生（boot 很早期）。
+3. **mGBA 对拍**（旧清单 §6.2c 的遗留项）：构建 `D:\project\rust\mgba` headless 截图，
+   同 ROM 同帧对拍像素差，定位 PPU 细节偏差（窗口/混合/马赛克还没被真实 ROM 压测过）。
+4. **M3 系统**：中断控制器完善、KEYINPUT（现恒 0x3FF）、Flash 128KB 存档。
+   验收 = FireRed 新游戏 → 走入世界 → 存档重启可 CONTINUE。
+5. 按需更新 `README.md` 里程碑与本文件；**继续遵守"不写注释/不写解释文档"约定**。
 
 ## 7. 未完成/已知限制总表
 
 | 项 | 状态 | 解决时机 |
 |---|---|---|
-| PPU 渲染输出纯色（内容未出来） | **M2 核心缺口** | 立即（见 §6.2） |
-| M2 模块（scheduler/ppu/timer/dma/io）测试 | 零测试 | M2 收尾（§6.3） |
+| FireRed 引导停在 RNG 种子循环（未映射 IO 开总线缺失） | **当前卡点** | 立即（§6.1） |
+| 未映射 IO 读恒 0（与上同源） | 待修 | 立即 |
 | HBlank 精确时机（960/272 细分）、HBlank DMA 时序 | 整行近似 | M3/M6 按需 |
 | DMA 触发方式 3（声音 FIFO/视频捕获） | 未实现 | M4 音频 |
-| Halt 唤醒 | 已接入 `service_irq`（受 I 标志/IME 限制） | M3 完善 |
 | GPIO/RTC、EEPROM、SRAM/Flash 存档 | 未开始 | M3 |
 | APU 音频 | 未开始 | M4 |
 | 按键输入（KEYINPUT 恒 0x3FF 全未按） | 未开始 | M3 |
+| Huffman 仅 bits ∈ {2,4,8}、BitUnPack 位宽 8/16/32 | M1 遗留限制 | 按需 |
+| mGBA 同帧对拍 | 未做 | M2 收尾 |
 
 ## 8. 参考资源
 
-- GBATEK（problemkaputt.de/gbatek.htm）：一切硬件行为的最终依据；
-- 本地 mGBA 源码 `D:\project\rust\mgba`（`src/gba/video.c` PPU、`src/gba/io.c` IO、
-  `src/gba/dma.c` DMA、`src/gba/timer.c` 定时器）；
+- GBATEK（problemkaputt.de/gbatek.htm）：硬件行为最终依据（直连与 WebFetch 都 403，
+  需要时可用 mGBA 源码宏定义交叉验证，本次 DMA 位域即如此定案）；
+- 本地 mGBA 源码 `D:\project\rust\mgba`：`video.c`（行事件/HBlank 时点）、
+  `renderers/video-software.c`（窗口全关 = 0xFF）、`dma.c` + `include/mgba/internal/gba/dma.h`
+  （DMA 位域与 repeat/reload 语义）、`sio.c`（SIO 完成清 start 位 + IRQ）、
+  `hle-bios.s`（IRQ 桩原文：`b irqBase`）；
 - 测试 ROM：`test-roms/armwrestler.gba`；gba-tests 系列可从 `destoer/gba-tests`（GitHub）获取；
-- 项目约定：不写解释文档（历史 `docs/notes/` 已删除），代码注释只保留改动前已有的。
+- 项目约定：不写解释文档、不写代码注释（历史遗留注释保留不动）。
