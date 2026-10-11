@@ -18,10 +18,8 @@ impl Ppu {
         let obj_win_on = self.dispcnt & (1 << 15) != 0;
 
         if !win0_on && !win1_on && !obj_win_on {
-            // 无窗口启用：全部像素用 WINOUT 的外侧设置，且特效位跟随。
-            let outer = self.winout_mask(true);
             for i in 0..super::SCREEN_WIDTH {
-                self.win_mask[i] = outer;
+                self.win_mask[i] = 0x3F;
             }
             return;
         }

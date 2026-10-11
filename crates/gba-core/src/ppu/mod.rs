@@ -41,6 +41,7 @@ pub struct Ppu {
     mosaic: u16,
     /// 当前扫描线渲染出的 240 个 BGR555 像素。
     pub(crate) line: [u16; SCREEN_WIDTH],
+    pub(crate) frame555: Vec<u16>,
     /// 每像素的来源图层编号（BG0-3 = 0-3，OBJ = 4，背景色 = 0xFF）。
     pub(crate) line_layer: [u8; SCREEN_WIDTH],
     /// 每像素是否为半透明 OBJ。
@@ -76,6 +77,7 @@ impl Ppu {
             bldy: 0,
             mosaic: 0,
             line: [0; SCREEN_WIDTH],
+            frame555: vec![0; SCREEN_WIDTH * VISIBLE_LINES as usize],
             line_layer: [LAYER_BACKDROP; SCREEN_WIDTH],
             line_semi: [false; SCREEN_WIDTH],
             line_second: [0; SCREEN_WIDTH],
@@ -277,6 +279,8 @@ impl Ppu {
             self.render_sprites(y, &mut best_prio);
         }
         self.apply_blending();
+        let y = y as usize;
+        self.frame555[y * SCREEN_WIDTH..(y + 1) * SCREEN_WIDTH].copy_from_slice(&self.line);
         self.advance_affine();
     }
 
@@ -326,10 +330,10 @@ impl Ppu {
         self.palette_read_u16(0)
     }
 
-    /// 把当前扫描线转成 RGBA8888 写入帧缓冲。
+    /// 把已留档的第 `y` 行转成 RGBA8888 写入帧缓冲。
     pub fn write_line_to_frame(&self, y: usize, frame: &mut [u8]) {
         for x in 0..SCREEN_WIDTH {
-            let (r, g, b) = bgr555_to_rgb888(self.line[x]);
+            let (r, g, b) = bgr555_to_rgb888(self.frame555[y * SCREEN_WIDTH + x]);
             let i = (y * SCREEN_WIDTH + x) * 4;
             frame[i] = r;
             frame[i + 1] = g;
@@ -354,5 +358,111 @@ fn expand5(v: u8) -> u8 {
 impl Default for Ppu {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode4_ppu() -> Ppu {
+        let mut p = Ppu::new();
+        p.write_dispcnt(0x0404);
+        p.palette[2] = 0xFF;
+        p.palette[3] = 0x7F;
+        p.palette[4] = 0x00;
+        p.palette[5] = 0x7C;
+        p
+    }
+
+    #[test]
+    fn mode4_renders_palette_indexed_row() {
+        let mut p = mode4_ppu();
+        p.vram[0] = 1;
+        p.vram[1] = 2;
+        p.render_line(0);
+        assert_eq!(p.line[0], 0x7FFF);
+        assert_eq!(p.line[1], 0x7C00);
+        assert_eq!(p.line[2], 0);
+    }
+
+    #[test]
+    fn mode4_page_flip_selects_vram_half() {
+        let mut p = mode4_ppu();
+        p.vram[0xA000] = 1;
+        p.render_line(0);
+        assert_eq!(p.line[0], 0);
+        p.write_dispcnt(0x0414);
+        p.render_line(0);
+        assert_eq!(p.line[0], 0x7FFF);
+    }
+
+    #[test]
+    fn capture_keeps_every_rendered_line() {
+        let mut p = mode4_ppu();
+        p.vram[0] = 1;
+        p.vram[240] = 2;
+        p.render_line(0);
+        p.render_line(1);
+        let mut frame = vec![0u8; SCREEN_WIDTH * 160 * 4];
+        p.write_line_to_frame(0, &mut frame);
+        assert_eq!(&frame[0..4], &[255, 255, 255, 255]);
+        p.write_line_to_frame(1, &mut frame);
+        assert_eq!(&frame[960..963], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn disabled_windows_show_all_layers() {
+        let mut p = mode4_ppu();
+        p.write_winout(0x0000);
+        p.vram[0] = 1;
+        p.render_line(0);
+        assert_eq!(p.line[0], 0x7FFF);
+    }
+
+    #[test]
+    fn mode0_text_bg_maps_tiles() {
+        let mut p = Ppu::new();
+        p.write_dispcnt(0x0100);
+        p.write_bgcnt(0, 0x0100);
+        p.palette[2] = 0xFF;
+        p.palette[3] = 0x7F;
+        for i in 0..32usize {
+            p.vram[0x800 + i * 2] = 0x01;
+        }
+        for b in 0..32usize {
+            p.vram[32 + b] = 0x11;
+        }
+        p.render_line(0);
+        if let Some(x) = p.line.iter().position(|&c| c != 0x7FFF) {
+            eprintln!(
+                "mismatch x={x} val={:#06x} entry={:#06x}",
+                p.line[x],
+                p.vram[0x800 + (x / 8) * 2]
+            );
+        }
+        assert!(p.line.iter().all(|&c| c == 0x7FFF));
+    }
+
+    #[test]
+    fn obj_layer_covers_bg_on_same_priority() {
+        let mut p = mode4_ppu();
+        p.write_dispcnt(0x1404);
+        let y = 40u16;
+        p.vram[y as usize * SCREEN_WIDTH + 8] = 1;
+        p.oam[0] = y as u8;
+        p.oam[1] = 0;
+        p.oam[2] = 0;
+        p.oam[3] = 0;
+        p.oam[4] = 0x01;
+        p.oam[5] = 0x20;
+        for i in 32..64usize {
+            p.vram[0x1_0000 + i] = 0x22;
+        }
+        p.palette[290 * 2] = 0x1F;
+        p.palette[290 * 2 + 1] = 0x00;
+        p.render_line(y);
+        assert_eq!(p.line[0], 0x001F);
+        assert_eq!(p.line[8], 0x7FFF);
     }
 }

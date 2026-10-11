@@ -16,9 +16,10 @@ pub struct Io {
     ime: u16,
     waitcnt: u16,
     /// SIO 内部时钟移位的剩余周期。FireRed 引导用 SIO 中断做随机种子：
-    /// SIOCNT 的启动位写入后，8 位移位在内部时钟（256 周期/位）下完成并
-    /// 置起 IF 的 SIO 位（bit7）。
+    /// SIOCNT 的启动位写入后，8 位移位在内部时钟（256 周期/位）下完成，
+    /// 完成时硬件清掉 SIOCNT 的 start 位并置起 IF 的 SIO 位（bit7）。
     sio_shift_remaining: u32,
+    siocnt: u16,
 }
 
 /// 一次 8 位内部时钟移位的周期数（GBATEK：内部时钟 256 周期/位）。
@@ -36,15 +37,17 @@ impl Io {
             ime: 0,
             waitcnt: 0,
             sio_shift_remaining: 0,
+            siocnt: 0,
         }
     }
 
-    /// 每步调用：SIO 移位完成时投递 SIO 中断。
+    /// 每步调用：SIO 移位完成时清 start 位并投递 SIO 中断。
     pub fn tick(&mut self, cycles: u32) {
         if self.sio_shift_remaining > 0 {
             let done = self.sio_shift_remaining <= cycles;
             self.sio_shift_remaining = self.sio_shift_remaining.saturating_sub(cycles);
             if done {
+                self.siocnt &= !0x0080;
                 self.request_irq(1 << 7);
             }
         }
@@ -130,6 +133,8 @@ impl Io {
             0x054 => self.ppu.bldy(),
             0x130 => self.keyinput,
             0x132 => 0,
+            0x128 => self.siocnt,
+            0x12A => 0,
             0x134 => 0,
             0x200 => self.ie,
             0x202 => self.irq_flag,
@@ -336,13 +341,14 @@ impl Io {
                 None
             }
             0x130 => None,
-            0x134 => {
-                // SIOCNT：bit7 = 启动移位（内部时钟模式）
+            0x128 => {
+                self.siocnt = value;
                 if value & 0x0080 != 0 {
                     self.sio_shift_remaining = SIO_SHIFT_CYCLES;
                 }
                 None
             }
+            0x134 => None,
             0x200 => {
                 #[cfg(feature = "trace-io")]
                 eprintln!("IE = {value:#06x} (at write_u16)");

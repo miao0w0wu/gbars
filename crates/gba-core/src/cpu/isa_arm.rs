@@ -89,16 +89,14 @@ impl Cpu {
         }
         // 位 7、4 同时为 1 → 乘法 / SWP / 半字传输 的判别区
         if insn & 0x90 == 0x90 {
-            if insn & (1 << 24) == 0 {
-                self.multiply(insn); // 位 27-24 = 0000：乘法族
-            } else if insn & (1 << 6) == 0 && insn & (1 << 5) == 0 {
-                // SWP/SWPB：位 6-5 **同时**为 00 才是交换指令。
-                // 半字族位 6-5 = 01(H)/10(SB)/11(SH)——只判 bit6 会把 LDRH
-                // （bit6=0, bit5=1）误判成 SWP，只判 bit5 会把 LDRSB 误判。
-                // 必须两位一起判。
-                self.swap(insn, bus);
+            if insn & 0x60 == 0 {
+                if insn & (1 << 24) == 0 {
+                    self.multiply(insn);
+                } else {
+                    self.swap(insn, bus);
+                }
             } else {
-                self.half_transfer(insn, bus); // 位 6-5 ≠ 00：半字/有符号传输
+                self.half_transfer(insn, bus);
             }
             return Ok(());
         }
@@ -807,6 +805,29 @@ mod tests {
         cpu.arm_step(0xE481_1004, &mut bus).unwrap(); // STR r1, [r1], #4
         assert_eq!(bus.read_u32(0x0200_0000), 0x0200_0000);
         assert_eq!(cpu.reg(1), 0x0200_0004); // 基址写回
+    }
+
+    #[test]
+    fn post_index_halfword_writeback_and_multiply_distinction() {
+        let (mut cpu, mut bus) = setup();
+        bus.write_u16(0x0200_0000, 0x5678);
+        cpu.regs[1] = 0x0200_0000;
+        cpu.regs[2] = 4;
+        cpu.arm_step(0xE091_30B2, &mut bus).unwrap();
+        assert_eq!(cpu.reg(3), 0x5678);
+        assert_eq!(cpu.reg(1), 0x0200_0004);
+
+        cpu.regs[1] = 0x0200_0010;
+        cpu.regs[2] = 0xABCD;
+        cpu.arm_step(0xE0C1_20B2, &mut bus).unwrap();
+        assert_eq!(bus.read_u16(0x0200_0010), 0xABCD);
+        assert_eq!(cpu.reg(1), 0x0200_0012);
+
+        cpu.regs[2] = 0x0001_0000;
+        cpu.regs[3] = 0x0002_0000;
+        cpu.arm_step(0xE081_0392, &mut bus).unwrap();
+        assert_eq!(cpu.reg(1), 2);
+        assert_eq!(cpu.reg(0), 0);
     }
 
     #[test]

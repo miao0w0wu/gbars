@@ -246,8 +246,9 @@ fn cpu_set(cpu: &mut Cpu, bus: &mut Bus, fast: bool) {
         let words = count / 4;
         let blocks = words.div_ceil(8);
         if fill {
+            let value = bus.read_u32(src);
             for i in 0..blocks * 8 {
-                bus.write_u32(dst + i * 4, src);
+                bus.write_u32(dst + i * 4, value);
             }
         } else {
             for i in 0..blocks * 8 {
@@ -259,8 +260,9 @@ fn cpu_set(cpu: &mut Cpu, bus: &mut Bus, fast: bool) {
         let wide = ctrl & (1 << 26) != 0;
         if wide {
             if fill {
+                let value = bus.read_u32(src);
                 for i in 0..count {
-                    bus.write_u32(dst + i * 4, src);
+                    bus.write_u32(dst + i * 4, value);
                 }
             } else {
                 for i in 0..count {
@@ -269,7 +271,7 @@ fn cpu_set(cpu: &mut Cpu, bus: &mut Bus, fast: bool) {
                 }
             }
         } else if fill {
-            let half = src as u16;
+            let half = bus.read_u16(src);
             for i in 0..count {
                 bus.write_u16(dst + i * 2, half);
             }
@@ -626,11 +628,12 @@ mod tests {
         assert_eq!(bus.read_u32(0x0200_1000), 0x1000);
         assert_eq!(bus.read_u32(0x0200_100C), 0x1003);
 
-        cpu.regs[0] = 0xDEAD_BEEF;
+        cpu.regs[0] = 0x0200_0000;
         cpu.regs[1] = 0x0200_2000;
         cpu.regs[2] = 2 | (1 << 24) | (1 << 26); // 2 个字 + 填充 + 32 位
         cpu_set(&mut cpu, &mut bus, false);
-        assert_eq!(bus.read_u32(0x0200_2004), 0xDEAD_BEEF);
+        assert_eq!(bus.read_u32(0x0200_2000), 0x1000);
+        assert_eq!(bus.read_u32(0x0200_2004), 0x1000);
     }
 
     #[test]

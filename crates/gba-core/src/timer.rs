@@ -120,3 +120,76 @@ impl Timers {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prescale_one_overflows_and_reloads() {
+        let mut t = Timers::new();
+        t.write_reload(0, 0xFFFE);
+        t.write_ctrl(0, 0x80);
+        t.tick(1);
+        assert_eq!(t.read_counter(0), 0xFFFF);
+        let of = t.tick(1);
+        assert_eq!(of, 0b0001);
+        assert_eq!(t.read_counter(0), 0xFFFE);
+    }
+
+    #[test]
+    fn prescale_sixtyfour_accumulates_remainder() {
+        let mut t = Timers::new();
+        t.write_reload(0, 0);
+        t.write_ctrl(0, 0x81);
+        t.tick(63);
+        assert_eq!(t.read_counter(0), 0);
+        t.tick(1);
+        assert_eq!(t.read_counter(0), 1);
+        t.tick(64);
+        assert_eq!(t.read_counter(0), 2);
+    }
+
+    #[test]
+    fn enable_edge_reloads_counter() {
+        let mut t = Timers::new();
+        t.write_reload(0, 0);
+        t.write_ctrl(0, 0x80);
+        t.tick(5);
+        assert_eq!(t.read_counter(0), 5);
+        t.write_ctrl(0, 0x00);
+        t.tick(5);
+        assert_eq!(t.read_counter(0), 5);
+        t.write_ctrl(0, 0x80);
+        assert_eq!(t.read_counter(0), 0);
+    }
+
+    #[test]
+    fn cascade_drives_upper_timer() {
+        let mut t = Timers::new();
+        t.write_reload(0, 0xFFFF);
+        t.write_ctrl(0, 0x80);
+        t.write_reload(1, 0x1234);
+        t.write_ctrl(1, 0x84);
+        let of = t.tick(1);
+        assert_eq!(of, 0b0001);
+        assert_eq!(t.read_counter(1), 0x1235);
+        t.write_reload(1, 0xFFFF);
+        let of = t.tick(1);
+        assert_eq!(of, 0b0011);
+        assert_eq!(t.read_counter(1), 0xFFFF);
+    }
+
+    #[test]
+    fn cascade_timer_ignores_own_prescale() {
+        let mut t = Timers::new();
+        t.write_reload(0, 0xFFFF);
+        t.write_ctrl(0, 0x80);
+        t.write_reload(1, 0);
+        t.write_ctrl(1, 0x87);
+        for _ in 0..5 {
+            t.tick(1);
+        }
+        assert_eq!(t.read_counter(1), 5);
+    }
+}

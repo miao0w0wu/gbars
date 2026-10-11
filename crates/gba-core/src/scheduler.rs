@@ -31,25 +31,32 @@ impl Scheduler {
         self.vblank_reached = false;
     }
 
+    pub fn now(&self) -> u32 {
+        self.now
+    }
+
     /// 推进一帧：CPU 执行指令直到耗尽 280,896 周期，沿途按扫描线边界渲染、
     /// 推进定时器。
     pub fn run_frame(&mut self, cpu: &mut Cpu, bus: &mut Bus) -> Result<(), CpuError> {
         while self.now < CYCLES_PER_FRAME {
-            cpu.step(bus)?;
-            let cycles = cpu.take_cycles().max(1);
-            let after = self.now + cycles;
-            // 定时器推进到当前点（行事件只影响 PPU 状态，不影响定时器）；
-            // 溢出按 TMxCNT_H 位 6 的使能投递 IE 位 3-6。
-            let timer_overflow = bus.io.timers.tick(cycles);
-            for i in 0..4usize {
-                if timer_overflow & (1 << i) != 0 && bus.io.timers.timer[i].irq_enabled() {
-                    bus.io.request_irq(1 << (3 + i));
-                }
-            }
-            bus.io.tick(cycles);
-            self.advance(bus, after);
-            self.now = after;
+            self.run_instruction(cpu, bus)?;
         }
+        Ok(())
+    }
+
+    pub fn run_instruction(&mut self, cpu: &mut Cpu, bus: &mut Bus) -> Result<(), CpuError> {
+        cpu.step(bus)?;
+        let cycles = cpu.take_cycles().max(1);
+        let after = self.now + cycles;
+        let timer_overflow = bus.io.timers.tick(cycles);
+        for i in 0..4usize {
+            if timer_overflow & (1 << i) != 0 && bus.io.timers.timer[i].irq_enabled() {
+                bus.io.request_irq(1 << (3 + i));
+            }
+        }
+        bus.io.tick(cycles);
+        self.advance(bus, after);
+        self.now = after;
         Ok(())
     }
 
@@ -75,11 +82,15 @@ impl Scheduler {
                 if ppu.dispstat() & (1 << 4) != 0 {
                     bus.io.request_irq(1 << 1);
                 }
+                bus.run_dma_triggers(2);
             } else {
                 ppu.set_dispstat_flag(0, true); // VBlank
                 self.vblank_reached = true;
                 if ppu.dispstat() & (1 << 3) != 0 {
                     bus.io.request_irq(1 << 0);
+                }
+                if line == VISIBLE_LINES {
+                    bus.run_dma_triggers(1);
                 }
             }
             let _ = line_started;
@@ -96,5 +107,112 @@ impl Scheduler {
 impl Default for Scheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cartridge::Cartridge;
+
+    fn spin() -> (Cpu, Bus) {
+        let mut rom = vec![0u8; 0x100];
+        rom[0..4].copy_from_slice(&0xEAFF_FFFEu32.to_le_bytes());
+        let bus = Bus::new(Cartridge::from_bytes(rom.into()).unwrap());
+        (Cpu::new_no_bios(), bus)
+    }
+
+    #[test]
+    fn full_frame_reaches_line_227_with_vblank_flags() {
+        let (mut cpu, mut bus) = spin();
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        assert_eq!(s.vcount(), 227);
+        assert!(s.vblank_reached);
+        assert_eq!(bus.ppu().dispstat() & 0x3, 0x3);
+    }
+
+    #[test]
+    fn vblank_flag_toggles_at_line_160() {
+        let (mut cpu, mut bus) = spin();
+        let mut s = Scheduler::new();
+        while bus.ppu().vcount() < 159 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+        }
+        assert_eq!(bus.ppu().dispstat() & 1, 0);
+        assert_eq!(bus.ppu().dispstat() & 2, 2);
+        while bus.ppu().vcount() < 160 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+        }
+        assert_eq!(bus.ppu().dispstat() & 1, 1);
+    }
+
+    #[test]
+    fn vblank_irq_requested_only_when_dispstat_enables() {
+        let (mut cpu, mut bus) = spin();
+        bus.write_u16(0x0400_0004, 0x0008);
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        assert_eq!(bus.io.read_u16(0x0202) & 0x1, 0x1);
+
+        let (mut cpu, mut bus) = spin();
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        assert_eq!(bus.io.read_u16(0x0202) & 0x1, 0x0);
+    }
+
+    #[test]
+    fn hblank_irq_requested_when_enabled() {
+        let (mut cpu, mut bus) = spin();
+        bus.write_u16(0x0400_0004, 0x0010);
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        assert_eq!(bus.io.read_u16(0x0202) & 0x2, 0x2);
+    }
+
+    #[test]
+    fn timer_overflow_requests_irq_bit3() {
+        let (mut cpu, mut bus) = spin();
+        bus.write_u16(0x0400_0100, 0x0000);
+        bus.write_u16(0x0400_0102, 0x00C0);
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        assert_eq!(bus.io.read_u16(0x0202) & 0x8, 0x8);
+    }
+
+    #[test]
+    fn hblank_dma_runs_once_per_visible_line() {
+        let (mut cpu, mut bus) = spin();
+        for i in 0..192u32 {
+            bus.write_u16(0x0200_0000 + i * 2, 0x5000 + i as u16);
+        }
+        bus.write_u32(0x0400_00DC, 0x0200_0000);
+        bus.write_u32(0x0400_00E0, 0x0200_0200);
+        bus.write_u16(0x0400_00E4, 1);
+        bus.write_u16(0x0400_00E6, 0xA200);
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        for j in [0u32, 1, 80, 159] {
+            assert_eq!(
+                bus.read_u16(0x0200_0200 + j * 2),
+                0x5000 + j as u16,
+                "dst[{j}]"
+            );
+        }
+        assert_eq!(bus.read_u16(0x0200_0200 + 160 * 2), 0);
+    }
+
+    #[test]
+    fn vblank_dma_fires_at_line_160() {
+        let (mut cpu, mut bus) = spin();
+        bus.write_u16(0x0200_0000, 0x1234);
+        bus.write_u32(0x0400_00DC, 0x0200_0000);
+        bus.write_u32(0x0400_00E0, 0x0200_0100);
+        bus.write_u16(0x0400_00E4, 1);
+        bus.write_u16(0x0400_00E6, 0x9000);
+        let mut s = Scheduler::new();
+        s.run_frame(&mut cpu, &mut bus).unwrap();
+        assert_eq!(bus.read_u16(0x0200_0100), 0x1234);
+        assert_eq!(bus.io.dma.channel[3].ctrl & 0x8000, 0);
     }
 }

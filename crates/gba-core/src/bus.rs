@@ -74,9 +74,8 @@ impl Bus {
             let i = addr as usize;
             bios[i..i + 4].copy_from_slice(&word.to_le_bytes());
         };
-        // 0x18 向量：LDR PC,[PC,#-8] 读 0x18 处的字面量 0x120
-        put(&mut self.bios, 0x18, 0xE51F_F008);
-        put(&mut self.bios, 0x1C, 0x0000_0120);
+        // 0x18 向量：b 0x120（与 mGBA hle-bios.s 的 `b irqBase` 一致）
+        put(&mut self.bios, 0x18, 0xEA00_0040);
         // irqBase（mGBA hle-bios.s 的 IRQ 入口，逐条翻译）
         put(&mut self.bios, 0x120, 0xE92D_500F); // STMFD SP!, {r0-r3,r12,lr}
         put(&mut self.bios, 0x124, 0xE3A0_0404); // MOV r0, #0x04000000
@@ -288,7 +287,24 @@ impl Bus {
         while let Some(ch) = self.io.dma.take_pending() {
             let mut ch_state = self.io.dma.channel[ch];
             Dma::run_channel(ch, &mut ch_state, self);
+            if ch_state.ctrl & 0x4000 != 0 {
+                self.io.request_irq(1 << (8 + ch as u16));
+            }
             self.io.dma.channel[ch] = ch_state;
+        }
+    }
+
+    /// 执行触发码匹配 `timing`（1 = VBlank，2 = HBlank）的已使能通道。
+    pub(crate) fn run_dma_triggers(&mut self, timing: u16) {
+        for ch in 0..4usize {
+            let mut ch_state = self.io.dma.channel[ch];
+            if ch_state.ctrl & 0x8000 != 0 && (ch_state.ctrl >> 12) & 0x3 == timing {
+                Dma::run_channel(ch, &mut ch_state, self);
+                if ch_state.ctrl & 0x4000 != 0 {
+                    self.io.request_irq(1 << (8 + ch as u16));
+                }
+                self.io.dma.channel[ch] = ch_state;
+            }
         }
     }
 }

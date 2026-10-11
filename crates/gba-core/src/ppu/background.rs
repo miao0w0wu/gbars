@@ -26,7 +26,7 @@ impl Ppu {
         let char_base = ((cnt & 0x000F) as u32) * 0x4000;
         // BG0 只有 4bpp；BG1–BG3 的位 7 选择 8bpp。
         let color_8bpp = bg != 0 && cnt & 0x0080 != 0;
-        let screen_base = (((cnt & 0x1F00) >> 8) as u32) * 0x800;
+        let screen_base = (((cnt & 0x1F00) >> 8) as u32) * 0x400;
         let (size_w, size_h) = match (cnt >> 14) & 0x3 {
             0 => (256u32, 256u32),
             1 => (512, 256),
