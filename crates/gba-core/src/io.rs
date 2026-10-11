@@ -159,22 +159,65 @@ impl Io {
     /// 返回 Some(ch) 表示该写触发了一次立即 DMA 传输（由 Bus 执行搬运）。
     pub fn write_u16(&mut self, addr: u32, value: u16) -> Option<usize> {
         let trigger: Option<usize> = match addr & 0x3FE {
-            0x000 => { self.ppu.write_dispcnt(value); None }
-            0x004 => { self.ppu.write_dispstat(value); None }
-            0x008 => { self.ppu.write_bgcnt(0, value); None }
-            0x00A => { self.ppu.write_bgcnt(1, value); None }
-            0x00C => { self.ppu.write_bgcnt(2, value); None }
-            0x00E => { self.ppu.write_bgcnt(3, value); None }
-            0x100 => { self.timers.write_reload(0, value); None }
-            0x104 => { self.timers.write_reload(1, value); None }
-            0x108 => { self.timers.write_reload(2, value); None }
-            0x10C => { self.timers.write_reload(3, value); None }
-            0x102 => { self.timers.write_ctrl(0, value); None }
-            0x106 => { self.timers.write_ctrl(1, value); None }
-            0x10A => { self.timers.write_ctrl(2, value); None }
-            0x10E => { self.timers.write_ctrl(3, value); None }
+            0x000 => {
+                self.ppu.write_dispcnt(value);
+                None
+            }
+            0x004 => {
+                self.ppu.write_dispstat(value);
+                None
+            }
+            0x008 => {
+                self.ppu.write_bgcnt(0, value);
+                None
+            }
+            0x00A => {
+                self.ppu.write_bgcnt(1, value);
+                None
+            }
+            0x00C => {
+                self.ppu.write_bgcnt(2, value);
+                None
+            }
+            0x00E => {
+                self.ppu.write_bgcnt(3, value);
+                None
+            }
+            0x100 => {
+                self.timers.write_reload(0, value);
+                None
+            }
+            0x104 => {
+                self.timers.write_reload(1, value);
+                None
+            }
+            0x108 => {
+                self.timers.write_reload(2, value);
+                None
+            }
+            0x10C => {
+                self.timers.write_reload(3, value);
+                None
+            }
+            0x102 => {
+                self.timers.write_ctrl(0, value);
+                None
+            }
+            0x106 => {
+                self.timers.write_ctrl(1, value);
+                None
+            }
+            0x10A => {
+                self.timers.write_ctrl(2, value);
+                None
+            }
+            0x10E => {
+                self.timers.write_ctrl(3, value);
+                None
+            }
             0x0B8 => {
-                self.dma.channel[0].src = (self.dma.channel[0].src & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[0].src =
+                    (self.dma.channel[0].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0BA => {
@@ -183,7 +226,8 @@ impl Io {
                 None
             }
             0x0BC => {
-                self.dma.channel[0].dst = (self.dma.channel[0].dst & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[0].dst =
+                    (self.dma.channel[0].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0BE => {
@@ -197,7 +241,8 @@ impl Io {
             }
             0x0C2 => self.write_dma_ctrl(0, value),
             0x0C4 => {
-                self.dma.channel[1].src = (self.dma.channel[1].src & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[1].src =
+                    (self.dma.channel[1].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0C6 => {
@@ -206,7 +251,8 @@ impl Io {
                 None
             }
             0x0C8 => {
-                self.dma.channel[1].dst = (self.dma.channel[1].dst & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[1].dst =
+                    (self.dma.channel[1].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0CA => {
@@ -220,7 +266,8 @@ impl Io {
             }
             0x0CE => self.write_dma_ctrl(1, value),
             0x0D0 => {
-                self.dma.channel[2].src = (self.dma.channel[2].src & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[2].src =
+                    (self.dma.channel[2].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0D2 => {
@@ -229,7 +276,8 @@ impl Io {
                 None
             }
             0x0D4 => {
-                self.dma.channel[2].dst = (self.dma.channel[2].dst & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[2].dst =
+                    (self.dma.channel[2].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0D6 => {
@@ -243,7 +291,8 @@ impl Io {
             }
             0x0DA => self.write_dma_ctrl(2, value),
             0x0DC => {
-                self.dma.channel[3].src = (self.dma.channel[3].src & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[3].src =
+                    (self.dma.channel[3].src & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0DE => {
@@ -252,7 +301,8 @@ impl Io {
                 None
             }
             0x0E0 => {
-                self.dma.channel[3].dst = (self.dma.channel[3].dst & 0xFFFF_0000) | u32::from(value);
+                self.dma.channel[3].dst =
+                    (self.dma.channel[3].dst & 0xFFFF_0000) | u32::from(value);
                 None
             }
             0x0E2 => {
@@ -265,11 +315,26 @@ impl Io {
                 None
             }
             0x0E6 => self.write_dma_ctrl(3, value),
-            0x048 => { self.ppu.write_winin(value); None }
-            0x04A => { self.ppu.write_winout(value); None }
-            0x050 => { self.ppu.write_bldcnt(value); None }
-            0x052 => { self.ppu.write_bldalpha(value); None }
-            0x054 => { self.ppu.write_bldy(value); None }
+            0x048 => {
+                self.ppu.write_winin(value);
+                None
+            }
+            0x04A => {
+                self.ppu.write_winout(value);
+                None
+            }
+            0x050 => {
+                self.ppu.write_bldcnt(value);
+                None
+            }
+            0x052 => {
+                self.ppu.write_bldalpha(value);
+                None
+            }
+            0x054 => {
+                self.ppu.write_bldy(value);
+                None
+            }
             0x130 => None,
             0x134 => {
                 // SIOCNT：bit7 = 启动移位（内部时钟模式）

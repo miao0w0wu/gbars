@@ -128,7 +128,11 @@ fn run_frames(rom: &str, frames: u32, out: &str) -> Result<(), Box<dyn std::erro
     for i in 0..frames {
         if let Err(e) = gba.run_frame() {
             eprintln!("第 {i} 帧执行出错: {e}");
-            eprintln!("  当前 PC = {:#010x}，模式 = {:?}", gba.cpu.reg(15), gba.cpu.mode());
+            eprintln!(
+                "  当前 PC = {:#010x}，模式 = {:?}",
+                gba.cpu.reg(15),
+                gba.cpu.mode()
+            );
             return Err(e.into());
         }
     }

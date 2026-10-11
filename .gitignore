@@ -6,4 +6,7 @@ node_modules/
 dist/
 
 # headless 示例的本地产物
-test-frame.bmp
+*.bmp
+
+# 插件会话产物
+.mimosa/

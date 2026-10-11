@@ -63,8 +63,8 @@ impl Dma {
         let unit = if word { 4 } else { 2 };
         let dst_bits = (c.ctrl >> 5) & 0x3;
         let src_bits = (c.ctrl >> 7) & 0x3;
-        let src_delta = delta(src_bits) * unit as i32 / 2;
-        let dst_delta = delta(dst_bits) * unit as i32 / 2;
+        let src_delta = delta(src_bits) * unit / 2;
+        let dst_delta = delta(dst_bits) * unit / 2;
 
         let mut src = c.src;
         let mut dst = c.dst;
