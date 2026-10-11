@@ -36,10 +36,14 @@ impl Cpu {
     pub(crate) fn thumb_step(&mut self, insn: u16, bus: &mut Bus) {
         self.pc_written = false;
 
-        // BL/BLX 的第二条指令：由 thumb_upper 记录的半成品衔接完成
-        if self.thumb_pending_bl {
-            self.thumb_pending_bl = false;
+        // BL/BLX 按编码识别：0xF000-0xF7FF 是前缀，0xF800-0xFFFF 恒为后缀。
+        // 靠"上一条设过标志"配对会在 IRQ 恰好落在两条半字之间时错乱
+        // （前缀已改写 LR、返回后后缀会被当成新前缀），真机按编码分派无此问题。
+        let hi = insn & 0xF800;
+        if hi == 0xF800 {
             self.thumb_bl_complete(insn);
+        } else if hi == 0xF000 {
+            self.thumb_f19_long_branch(insn);
         } else {
             self.thumb_execute(insn, bus);
         }
@@ -541,7 +545,6 @@ impl Cpu {
             hi
         };
         self.regs[14] = self.regs[15].wrapping_add(offset);
-        self.thumb_pending_bl = true;
         self.thumb_bl_is_blx = insn & (1 << 12) == 0; // 位 12=0 为 BLX
     }
 
@@ -730,10 +733,26 @@ mod tests {
         // 第二条 目标 = LR + (lo<<1)，LR = 第二条地址 + 2（返回点）
         cpu.regs[15] = 0x0800_0004; // 第一条在 0x08000000，可见 PC = 0x08000004
         cpu.thumb_step(0xF000, &mut bus); // BL 前缀：hi = 0
-        assert!(cpu.thumb_pending_bl);
         assert_eq!(cpu.reg(14), 0x0800_0004); // LR 暂存高半偏移
         cpu.thumb_step(0xF840, &mut bus); // 完成后半：lo = 0x040 → 偏移 0x80
         assert_eq!(cpu.reg(15), 0x0800_0088); // 目标 0x08000084 + 流水线 4
         assert_eq!(cpu.reg(14), 0x0800_0005); // 返回地址 = 第二条(0x08000002)+2 = 0x04，|1
+    }
+
+    #[test]
+    fn bl_suffix_completes_after_irq_split_pair() {
+        let (mut cpu, mut bus) = setup_thumb();
+        // IRQ 落在 BL 前后缀之间：前缀已执行（LR 已暂存高半偏移），
+        // 中断返回后直接落到后缀——后缀必须按编码完成跳转，
+        // 不能依赖"上一条是否是前缀"的跨指令状态。
+        cpu.regs[15] = 0x0800_0004;
+        cpu.thumb_step(0xF000, &mut bus);
+        assert_eq!(cpu.reg(14), 0x0800_0004);
+        cpu.thumb_step(0x4770, &mut bus); // 模拟中断里执行的 BX LR 等指令
+        cpu.regs[15] = 0x0800_000A; // 中断返回，落在后缀 0x08000006（可见 PC = +4）
+        cpu.regs[14] = 0x0800_0004; // 前缀留下的暂存值
+        cpu.thumb_step(0xF840, &mut bus);
+        assert_eq!(cpu.reg(15), 0x0800_0088);
+        assert_eq!(cpu.reg(14), 0x0800_0009);
     }
 }

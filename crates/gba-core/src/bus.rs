@@ -52,6 +52,8 @@ pub struct Bus {
     /// 最近一次取指的 16 位值。GBA 对未映射地址（含未映射 I/O）的读返回
     /// 数据总线残值，mGBA（GBALoadBad）以最后取指的半字近似。
     last_fetch: u16,
+    /// 临时对拍探针（EXEC-M2 S10 删除）。
+    pub probe: crate::probe::Probe,
 }
 
 impl Bus {
@@ -65,6 +67,7 @@ impl Bus {
             io: Io::new(),
             data_cycles: 0,
             last_fetch: 0,
+            probe: crate::probe::Probe::new(),
         };
         bus.install_irq_stub();
         bus
@@ -91,6 +94,38 @@ impl Bus {
 
     pub fn cart(&self) -> &Cartridge {
         &self.cart
+    }
+
+    pub fn probe_iwram(&self) -> &[u8] {
+        &self.iwram
+    }
+
+    pub fn probe_ewram(&self) -> &[u8] {
+        &self.ewram
+    }
+
+    /// RegisterRamReset 的内存清空：BIOS 直接 memset，不经 CPU 数据通路，
+    /// 因此不计任何访问周期（对照 mGBA `_RegisterRamReset` 的 memset）。
+    pub(crate) fn hle_clear_ewram(&mut self, len: usize) {
+        let n = len.min(EWRAM_SIZE);
+        self.ewram[..n].fill(0);
+    }
+
+    pub(crate) fn hle_clear_iwram(&mut self, len: usize) {
+        let n = len.min(IWRAM_SIZE);
+        self.iwram[..n].fill(0);
+    }
+
+    pub(crate) fn hle_clear_palette(&mut self) {
+        self.io.ppu.palette.fill(0);
+    }
+
+    pub(crate) fn hle_clear_vram(&mut self) {
+        self.io.ppu.vram.fill(0);
+    }
+
+    pub(crate) fn hle_clear_oam(&mut self) {
+        self.io.ppu.oam.fill(0);
     }
 
     pub fn ppu(&self) -> &crate::ppu::Ppu {
@@ -224,11 +259,13 @@ impl Bus {
 
     pub fn write_u8(&mut self, addr: u32, value: u8) {
         self.charge_access(addr, false);
+        self.probe.log(addr, 1, u32::from(value));
         self.store_u8(addr, value, true);
     }
 
     pub fn write_u16(&mut self, addr: u32, value: u16) {
         self.charge_access(addr, false);
+        self.probe.log(addr, 2, u32::from(value));
         let a = addr & !1;
         self.store_u8(a, value as u8, false);
         self.store_u8(a + 1, (value >> 8) as u8, false);
@@ -236,6 +273,7 @@ impl Bus {
 
     pub fn write_u32(&mut self, addr: u32, value: u32) {
         self.charge_access(addr, true);
+        self.probe.log(addr, 4, value);
         let a = addr & !3;
         for i in 0..4 {
             self.store_u8(a + i, (value >> (i * 8)) as u8, false);
@@ -294,7 +332,9 @@ impl Bus {
     fn run_pending_dma(&mut self) {
         while let Some(ch) = self.io.dma.take_pending() {
             let mut ch_state = self.io.dma.channel[ch];
+            self.probe.dma_active = true;
             Dma::run_channel(ch, &mut ch_state, self);
+            self.probe.dma_active = false;
             if ch_state.ctrl & 0x4000 != 0 {
                 self.io.request_irq(1 << (8 + ch as u16));
             }
@@ -307,7 +347,9 @@ impl Bus {
         for ch in 0..4usize {
             let mut ch_state = self.io.dma.channel[ch];
             if ch_state.ctrl & 0x8000 != 0 && (ch_state.ctrl >> 12) & 0x3 == timing {
+                self.probe.dma_active = true;
                 Dma::run_channel(ch, &mut ch_state, self);
+                self.probe.dma_active = false;
                 if ch_state.ctrl & 0x4000 != 0 {
                     self.io.request_irq(1 << (8 + ch as u16));
                 }

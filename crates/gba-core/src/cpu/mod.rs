@@ -159,10 +159,8 @@ pub struct Cpu {
     pub(crate) spsr: [u32; 6],
     /// 本条指令是否改写了 PC（分支/LDR PC/异常入口置位）。
     pub(crate) pc_written: bool,
-    /// Thumb 的 BL/BLX 需要两条 16 位指令：第一条把高半偏移与返回地址
-    /// 预置进 LR 并置此标志，第二条到来时合并完成跳转。
-    pub(crate) thumb_pending_bl: bool,
-    /// 上面那条 BL 是否为 BLX（切到 ARM 执行）。
+    /// Thumb 的 BL 前缀（0xF000-0xF7FF）是否为 BLX（切到 ARM 执行）。
+    /// 后缀按编码识别（0xF800-0xFFFF），不依赖跨指令状态。
     pub(crate) thumb_bl_is_blx: bool,
     /// Halt/IntrWait 的睡眠标志（唤醒语义随 M3 中断实现）。
     pub(crate) halted: bool,
@@ -184,7 +182,6 @@ impl Cpu {
             banked_lr: [0; 6],
             spsr: [0; 6],
             pc_written: false,
-            thumb_pending_bl: false,
             thumb_bl_is_blx: false,
             halted: false,
             steps: 0,
@@ -205,6 +202,14 @@ impl Cpu {
 
     pub fn reg(&self, n: usize) -> u32 {
         self.regs[n]
+    }
+
+    pub fn probe_irq_sp(&self) -> u32 {
+        self.banked_sp[Mode::Irq.bank()]
+    }
+
+    pub fn probe_irq_spsr(&self) -> u32 {
+        self.spsr[Mode::Irq.bank()]
     }
 
     pub fn cpsr(&self) -> u32 {
@@ -319,12 +324,14 @@ impl Cpu {
         if self.t() {
             // Thumb 指令是 16 位，取指地址 = regs[15] - 4（两级流水）
             let fetch = self.regs[15].wrapping_sub(4);
+            bus.probe.pc = fetch;
             self.charge(Bus::access_cycles(fetch, false));
             let insn = bus.fetch_u16(fetch);
             self.thumb_step(insn, bus);
         } else {
             // ARM 指令 32 位：16 位总线上要取两次（ARM 态取指固定按字）
             let fetch = self.regs[15].wrapping_sub(8);
+            bus.probe.pc = fetch;
             self.charge(Bus::access_cycles(fetch, true));
             let insn = bus.fetch_u32(fetch);
             self.arm_step(insn, bus)?;

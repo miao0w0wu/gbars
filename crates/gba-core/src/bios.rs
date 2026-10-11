@@ -33,6 +33,11 @@ use crate::cpu::Cpu;
 
 /// SWI 主分发。`comment` 是指令编码里的立即数（ARM 24 位 / Thumb 8 位）。
 pub(crate) fn hle_swi(cpu: &mut Cpu, bus: &mut Bus, comment: u32) {
+    let saved = bus.probe.hle_active;
+    bus.probe.hle_active = matches!(
+        comment,
+        0x00 | 0x02 | 0x03 | 0x04 | 0x05 | 0x0B | 0x0C | 0x16..=0x1E
+    );
     match comment {
         0x00 => soft_reset(cpu, bus),
         0x01 => register_ram_reset(cpu, bus),
@@ -70,6 +75,7 @@ pub(crate) fn hle_swi(cpu: &mut Cpu, bus: &mut Bus, comment: u32) {
         0x1F => midi_key2freq(cpu, bus),
         _ => {} // 未知 SWI：no-op，绝不跳进零 BIOS
     }
+    bus.probe.hle_active = saved;
 }
 
 /// SoftReset：真机重启回 BIOS 入口。无 BIOS 模式下等效于"整机复位
@@ -93,29 +99,92 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
     let mask = cpu.reg(0);
     // 真机 BIOS 先把屏幕关成强制空白（mGBA 同款行为）
     bus.write_u16(0x0400_0000, 0x0080);
+    bus.probe.hle_active = true;
     if mask & 0x01 != 0 {
-        clear_mem(bus, 0x0200_0000, 0x0040_0000);
+        bus.hle_clear_ewram(0x0004_0000);
     }
     if mask & 0x02 != 0 {
         // IWRAM 顶部 0x200 字节是 IRQ 栈，BIOS 不清（GBATEK）
-        clear_mem(bus, 0x0300_0000, 0x0000_7E00);
+        bus.hle_clear_iwram(0x0000_7E00);
     }
     if mask & 0x04 != 0 {
-        clear_mem(bus, 0x0500_0000, 0x0000_0400);
+        bus.hle_clear_palette();
     }
     if mask & 0x08 != 0 {
-        clear_mem(bus, 0x0600_0000, 0x0001_8000);
+        bus.hle_clear_vram();
     }
-    if mask & 0x0_10 != 0 {
-        clear_mem(bus, 0x0700_0000, 0x0000_0400);
+    if mask & 0x10 != 0 {
+        bus.hle_clear_oam();
     }
-    // 位 5–7（串行/声音/其它寄存器）：TODO(M4) IO 寄存器语义就绪后补全
-}
-
-/// 向连续区域逐字节写 0。区域大小都是常量，编译器能优化成 memset。
-fn clear_mem(bus: &mut Bus, base: u32, size: u32) {
-    for i in 0..size {
-        bus.write_u8(base + i, 0);
+    bus.probe.hle_active = false;
+    if mask & 0x20 != 0 {
+        bus.write_u16(0x0400_0128, 0);
+        bus.write_u16(0x0400_0134, 0x8000);
+        bus.write_u16(0x0400_012A, 0);
+        bus.write_u16(0x0400_0140, 0);
+        bus.write_u32(0x0400_0150, 0);
+        bus.write_u32(0x0400_0154, 0);
+    }
+    if mask & 0x40 != 0 {
+        for reg in [
+            0x0400_0060, 0x0400_0062, 0x0400_0064, 0x0400_0068, 0x0400_006C, 0x0400_0070,
+            0x0400_0072, 0x0400_0074, 0x0400_0078, 0x0400_007C, 0x0400_0080, 0x0400_0082,
+            0x0400_0084,
+        ] {
+            bus.write_u16(reg, 0);
+        }
+        bus.write_u16(0x0400_0088, 0x0200);
+    }
+    if mask & 0x80 != 0 {
+        for reg in [
+            0x0400_0004, 0x0400_0006, 0x0400_0008, 0x0400_000A, 0x0400_000C, 0x0400_000E,
+            0x0400_0010, 0x0400_0012, 0x0400_0014, 0x0400_0016, 0x0400_0018, 0x0400_001A,
+            0x0400_001C, 0x0400_001E,
+        ] {
+            bus.write_u16(reg, 0);
+        }
+        for (reg, val) in [
+            (0x0400_0020, 0x0100),
+            (0x0400_0022, 0),
+            (0x0400_0024, 0),
+            (0x0400_0026, 0x0100),
+        ] {
+            bus.write_u16(reg, val);
+        }
+        bus.write_u32(0x0400_0028, 0);
+        bus.write_u32(0x0400_002C, 0);
+        for (reg, val) in [
+            (0x0400_0030, 0x0100),
+            (0x0400_0032, 0),
+            (0x0400_0034, 0),
+            (0x0400_0036, 0x0100),
+        ] {
+            bus.write_u16(reg, val);
+        }
+        bus.write_u32(0x0400_0038, 0);
+        bus.write_u32(0x0400_003C, 0);
+        for reg in [
+            0x0400_0040, 0x0400_0042, 0x0400_0044, 0x0400_0046, 0x0400_0048, 0x0400_004A,
+            0x0400_004C, 0x0400_0050, 0x0400_0052, 0x0400_0054,
+        ] {
+            bus.write_u16(reg, 0);
+        }
+        for ch in 0..4u32 {
+            let base = 0x0400_00B0 + ch * 12;
+            for off in [0, 2, 4, 6, 8, 10] {
+                bus.write_u16(base + off, 0);
+            }
+        }
+        for reg in [
+            0x0400_0100, 0x0400_0102, 0x0400_0104, 0x0400_0106, 0x0400_0108, 0x0400_010A,
+            0x0400_010C, 0x0400_010E,
+        ] {
+            bus.write_u16(reg, 0);
+        }
+        bus.write_u16(0x0400_0200, 0);
+        bus.write_u16(0x0400_0202, 0xFFFF);
+        bus.write_u16(0x0400_0204, 0);
+        bus.write_u16(0x0400_0208, 0);
     }
 }
 
@@ -613,6 +682,53 @@ mod tests {
         assert_eq!(isqrt(15), 3);
         assert_eq!(isqrt(16), 4);
         assert_eq!(isqrt(0xFFFF_FFFF), 65535);
+    }
+
+    #[test]
+    fn register_ram_reset_clears_ram_and_io() {
+        let (mut cpu, mut bus) = setup();
+        bus.probe.enabled = true;
+        bus.probe.pc = 0x0800_0000;
+        for i in (0..0x400).step_by(2) {
+            bus.write_u16(0x0200_0000 + i, 0xAA55);
+            bus.write_u16(0x0300_0000 + i, 0xAA55);
+            bus.write_u16(0x0500_0000 + i, 0xAA55);
+            bus.write_u16(0x0600_0000 + i, 0xAA55);
+            bus.write_u16(0x0700_0000 + i, 0xAA55);
+        }
+        bus.write_u16(0x0300_7E10, 0xAA55);
+        bus.write_u16(0x0400_0204, 0x4317);
+        bus.write_u16(0x0400_0208, 1);
+        bus.io.request_irq(0x0001);
+        assert_eq!(bus.read_u16(0x0400_0202), 0x0001);
+        cpu.regs[0] = 0xFF;
+        register_ram_reset(&mut cpu, &mut bus);
+
+        assert_eq!(bus.read_u16(0x0400_0000), 0x0080);
+        assert_eq!(bus.read_u32(0x0200_0000), 0);
+        assert_eq!(bus.read_u16(0x0203_FFFE), 0);
+        assert_eq!(bus.read_u16(0x0300_7DFE), 0);
+        assert_eq!(bus.read_u16(0x0300_7E10), 0xAA55);
+        assert_eq!(bus.read_u16(0x0500_0100), 0);
+        assert_eq!(bus.read_u16(0x0600_0FFFE), 0);
+        assert_eq!(bus.read_u16(0x0700_0200), 0);
+        assert_eq!(bus.read_u16(0x0400_0200), 0);
+        assert_eq!(bus.read_u16(0x0400_0202), 0);
+        assert_eq!(bus.read_u16(0x0400_0204), 0);
+        assert_eq!(bus.read_u16(0x0400_0208), 0);
+        assert_eq!(bus.read_u16(0x0400_0134), 0x8000);
+        let logged = |addr: u32, size: u32, val: u32| {
+            bus.probe
+                .records
+                .iter()
+                .any(|r| r.addr == addr && r.size == size && r.value == val)
+        };
+        assert!(logged(0x0400_0088, 2, 0x0200));
+        assert!(logged(0x0400_0020, 2, 0x0100));
+        assert!(logged(0x0400_0026, 2, 0x0100));
+        assert!(logged(0x0400_0134, 2, 0x8000));
+        assert!(logged(0x0400_00BA, 2, 0));
+        assert!(logged(0x0400_0150, 4, 0));
     }
 
     #[test]

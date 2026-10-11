@@ -2,7 +2,7 @@
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuError};
-use crate::ppu::{CYCLES_PER_LINE, TOTAL_LINES, VISIBLE_LINES};
+use crate::ppu::{CYCLES_PER_LINE, HDRAW_CYCLES, TOTAL_LINES, VISIBLE_LINES};
 
 /// 一帧的总周期数：228 线 × 1232 周期。
 pub const CYCLES_PER_FRAME: u32 = TOTAL_LINES as u32 * CYCLES_PER_LINE;
@@ -12,8 +12,12 @@ pub struct Scheduler {
     now: u32,
     /// 下一条待处理的扫描线（VCOUNT 值）。
     next_line: u16,
+    /// 当前行的起点事件是否已处理（行内还有 HBlank 事件待触发）。
+    start_done: bool,
     /// 本帧是否已到达 VBlank。
     pub vblank_reached: bool,
+    /// 已完整走完的帧数（now 回绕时 +1）。
+    frames: u64,
 }
 
 impl Scheduler {
@@ -21,13 +25,16 @@ impl Scheduler {
         Self {
             now: 0,
             next_line: 0,
+            start_done: false,
             vblank_reached: false,
+            frames: 0,
         }
     }
 
     pub fn reset_frame(&mut self) {
         self.now = 0;
         self.next_line = 0;
+        self.start_done = false;
         self.vblank_reached = false;
     }
 
@@ -38,7 +45,8 @@ impl Scheduler {
     /// 推进一帧：CPU 执行指令直到耗尽 280,896 周期，沿途按扫描线边界渲染、
     /// 推进定时器。
     pub fn run_frame(&mut self, cpu: &mut Cpu, bus: &mut Bus) -> Result<(), CpuError> {
-        while self.now < CYCLES_PER_FRAME {
+        let target = self.frames + 1;
+        while self.frames < target {
             self.run_instruction(cpu, bus)?;
         }
         Ok(())
@@ -55,8 +63,18 @@ impl Scheduler {
             }
         }
         bus.io.tick(cycles);
-        self.advance(bus, after);
         self.now = after;
+        self.advance(bus, after);
+        if self.now >= CYCLES_PER_FRAME {
+            while self.now >= CYCLES_PER_FRAME {
+                self.now -= CYCLES_PER_FRAME;
+                self.frames += 1;
+            }
+            self.next_line = 0;
+            self.start_done = false;
+            self.vblank_reached = false;
+            bus.ppu_mut().set_vcount(0);
+        }
         Ok(())
     }
 
@@ -67,40 +85,66 @@ impl Scheduler {
     fn advance(&mut self, bus: &mut Bus, after: u32) {
         while self.next_line < TOTAL_LINES {
             let line = self.next_line;
-            let line_end = (line as u32 + 1) * CYCLES_PER_LINE;
-            if line_end > after {
+            let line_start = line as u32 * CYCLES_PER_LINE;
+            let hblank_cycle = line_start + HDRAW_CYCLES;
+
+            if after < line_start {
                 break;
             }
-            let ppu = bus.ppu_mut();
-            ppu.set_vcount(line);
-            let line_started = line_end - CYCLES_PER_LINE;
-            if line < VISIBLE_LINES {
-                ppu.render_line(line);
-                ppu.set_dispstat_flag(0, false);
-                // HDraw 结束进 HBlank（此实现按整行事件近似：行尾置 HBlank）
-                ppu.set_dispstat_flag(1, true);
-                if ppu.dispstat() & (1 << 4) != 0 {
-                    bus.io.request_irq(1 << 1);
+
+            if !self.start_done {
+                let ppu = bus.ppu_mut();
+                ppu.set_vcount(line);
+                ppu.set_dispstat_flag(1, false);
+                let match_line = (ppu.dispstat() >> 8) as u16;
+                if line == match_line {
+                    ppu.set_dispstat_flag(2, true);
+                } else {
+                    ppu.set_dispstat_flag(2, false);
                 }
-                bus.run_dma_triggers(2);
-            } else {
-                ppu.set_dispstat_flag(0, true); // VBlank
-                self.vblank_reached = true;
-                if ppu.dispstat() & (1 << 3) != 0 {
-                    bus.io.request_irq(1 << 0);
+                if line == 0 {
+                    ppu.set_dispstat_flag(0, false);
+                } else if line == VISIBLE_LINES {
+                    ppu.set_dispstat_flag(0, true); // VBlank 起点即 VCOUNT=160 之时
+                }
+                if line > 0 && line - 1 < VISIBLE_LINES {
+                    ppu.render_line(line - 1);
+                }
+                let dispstat = ppu.dispstat();
+                if line == match_line && dispstat & (1 << 5) != 0 {
+                    bus.io.request_irq(1 << 2);
                 }
                 if line == VISIBLE_LINES {
+                    self.vblank_reached = true;
+                    if dispstat & (1 << 3) != 0 {
+                        bus.io.request_irq(1 << 0);
+                    }
                     bus.run_dma_triggers(1);
                 }
+                self.start_done = true;
             }
-            let _ = line_started;
-            self.next_line += 1;
+
+            if after >= hblank_cycle {
+                if line < VISIBLE_LINES {
+                    let ppu = bus.ppu_mut();
+                    ppu.set_dispstat_flag(1, true);
+                    let dispstat = ppu.dispstat();
+                    if dispstat & (1 << 4) != 0 {
+                        bus.io.request_irq(1 << 1);
+                    }
+                    bus.run_dma_triggers(2);
+                }
+                self.next_line = line + 1;
+                self.start_done = false;
+            } else {
+                return;
+            }
         }
     }
 
     /// 当前 VCOUNT（供 headless 输出）。
     pub fn vcount(&self) -> u16 {
-        self.next_line.saturating_sub(1).min(TOTAL_LINES - 1)
+        ((self.now / CYCLES_PER_LINE) as u16).min(TOTAL_LINES - 1)
     }
 }
 
@@ -126,10 +170,49 @@ mod tests {
     fn full_frame_reaches_line_227_with_vblank_flags() {
         let (mut cpu, mut bus) = spin();
         let mut s = Scheduler::new();
+        let mut guard = 0;
+        while !s.vblank_reached {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            guard += 1;
+            assert!(guard < 2_000_000, "VBlank 未按时到达");
+        }
+        assert_eq!(s.vcount(), 160);
+        assert_eq!(
+            bus.ppu().dispstat() & 0x3,
+            0x1,
+            "进入 VBlank：VBlank 置位、HBlank 已随行尾清除"
+        );
+    }
+
+    #[test]
+    fn run_instruction_keeps_advancing_vcount_across_frames() {
+        let (mut cpu, mut bus) = spin();
+        let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
-        assert_eq!(s.vcount(), 227);
-        assert!(s.vblank_reached);
-        assert_eq!(bus.ppu().dispstat() & 0x3, 0x3);
+        assert_eq!(s.vcount(), 0);
+        assert!(!s.vblank_reached);
+        let mut guard = 0;
+        while s.vcount() != 159 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            guard += 1;
+            assert!(guard < 2_000_000, "VCOUNT 卡死不再推进");
+        }
+        assert_eq!(bus.ppu().dispstat() & 0x1, 0);
+        assert_eq!(
+            bus.ppu().dispstat() & 0x2,
+            0,
+            "行首（HDraw 期）HBlank 标志应为 0"
+        );
+        while bus.ppu().dispstat() & 0x2 == 0 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            guard += 1;
+            assert!(guard < 2_000_000, "HBlank 标志未置位");
+        }
+        while !s.vblank_reached {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            guard += 1;
+            assert!(guard < 4_000_000, "第二帧 VBlank 未到达");
+        }
     }
 
     #[test]
@@ -140,11 +223,15 @@ mod tests {
             s.run_instruction(&mut cpu, &mut bus).unwrap();
         }
         assert_eq!(bus.ppu().dispstat() & 1, 0);
-        assert_eq!(bus.ppu().dispstat() & 2, 2);
+        while bus.ppu().dispstat() & 0x2 == 0 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+        }
+        assert_eq!(bus.ppu().dispstat() & 0x2, 0x2, "可见行 HBlank 窗口置位");
         while bus.ppu().vcount() < 160 {
             s.run_instruction(&mut cpu, &mut bus).unwrap();
         }
         assert_eq!(bus.ppu().dispstat() & 1, 1);
+        assert_eq!(bus.ppu().dispstat() & 2, 0, "行尾 HBlank 标志清除");
     }
 
     #[test]
@@ -168,6 +255,60 @@ mod tests {
         let mut s = Scheduler::new();
         s.run_frame(&mut cpu, &mut bus).unwrap();
         assert_eq!(bus.io.read_u16(0x0202, 0) & 0x2, 0x2);
+    }
+
+    #[test]
+    fn vblank_irq_requested_once_per_frame() {
+        let (mut cpu, mut bus) = spin();
+        bus.write_u16(0x0400_0004, 0x0008);
+        let mut s = Scheduler::new();
+        let mut guard = 0;
+        while bus.ppu().vcount() < 170 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            guard += 1;
+            assert!(guard < 2_000_000);
+        }
+        assert_eq!(bus.io.read_u16(0x0202, 0) & 0x1, 0x1);
+        bus.io.clear_irq(0xFFFF);
+        let mut extra = 0;
+        while s.vblank_reached {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            extra += 1;
+            assert!(extra < 2_000_000);
+        }
+        assert_eq!(
+            bus.io.read_u16(0x0202, 0) & 0x1,
+            0,
+            "VBlank 期间不得重复请求中断"
+        );
+    }
+
+    #[test]
+    fn vcount_irq_fires_once_at_match_line() {
+        let (mut cpu, mut bus) = spin();
+        // VCOUNT 匹配值 150 + 使能 VCount 中断（DISPSTAT 位 5）
+        bus.write_u16(0x0400_0004, 0x9620);
+        let mut s = Scheduler::new();
+        let mut guard = 0;
+        while s.vcount() != 150 {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            guard += 1;
+            assert!(guard < 2_000_000);
+        }
+        assert_eq!(bus.io.read_u16(0x0202, 0) & 0x4, 0x4);
+        assert_eq!(bus.ppu().dispstat() & 0x4, 0x4);
+        bus.io.clear_irq(0xFFFF);
+        let mut extra = 0;
+        while !s.vblank_reached {
+            s.run_instruction(&mut cpu, &mut bus).unwrap();
+            extra += 1;
+            assert!(extra < 2_000_000);
+        }
+        assert_eq!(
+            bus.io.read_u16(0x0202, 0) & 0x4,
+            0,
+            "VCount 匹配后本帧不得重复请求"
+        );
     }
 
     #[test]

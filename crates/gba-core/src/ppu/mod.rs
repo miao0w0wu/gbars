@@ -11,7 +11,7 @@ use crate::frame::SCREEN_WIDTH;
 pub const CYCLES_PER_LINE: u32 = 1232;
 pub const VISIBLE_LINES: u16 = 160;
 pub const TOTAL_LINES: u16 = 228;
-pub const HDRAW_CYCLES: u32 = 960;
+pub const HDRAW_CYCLES: u32 = 1008;
 
 pub const PALETTE_BASE: u32 = 0x0500_0000;
 pub const VRAM_BASE: u32 = 0x0600_0000;

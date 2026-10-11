@@ -1,0 +1,13 @@
+   Compiling gba-core v0.1.0 (D:\project\rust\gbars\crates\gba-core)
+    Finished `release` profile [optimized] target(s) in 8.23s
+     Running `target\release\examples\headless.exe 'D:/Games/gba roms/Pokemon.gba' 300 firered.bmp`
+ROM 文件:   D:/Games/gba roms/Pokemon.gba
+标题:       POKEMON FIRE
+游戏代码:   BPRE
+厂商代码:   01
+版本:       v1.1
+大小:       16777216 字节 (16.00 MiB)
+头部校验和: 通过
+跑完 300 帧：DISPCNT=0x0080 VCOUNT=0 模式=0 → firered.bmp
+  PC=0x030036bc 模式=System steps=60483219 TM0=0xff96 ctrl=0x80
+  handler=0x03003580 IME=1 IE=0x0000 IF=0x0000 DISPSTAT=0x0009

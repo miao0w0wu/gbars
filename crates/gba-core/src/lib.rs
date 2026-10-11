@@ -36,5 +36,6 @@ pub mod frame;
 pub mod gba;
 pub mod io;
 pub mod ppu;
+pub mod probe;
 pub mod scheduler;
 pub mod timer;

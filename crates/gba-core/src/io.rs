@@ -150,7 +150,10 @@ impl Io {
             0x132 => 0,
             0x128 => self.siocnt,
             0x12A => 0,
-            0x134 => 0,
+            0x134 => self.open_bus[(0x134 >> 1) as usize],
+            0x060..=0x088 | 0x0A0..=0x0AC | 0x120..=0x126 | 0x140..=0x15A => {
+                self.open_bus[((addr & 0x3FE) >> 1) as usize]
+            }
             0x200 => self.ie,
             0x202 => self.irq_flag,
             0x204 => self.waitcnt,
